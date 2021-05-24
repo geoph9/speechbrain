@@ -1307,8 +1307,17 @@ def batch_filter_seq2seq_output(prediction, eos_id=-1):
     [[1, 2, 3], [2, 3]]
     """
     outputs = []
+    if len(prediction.shape) == 3:  # in this case we have kept the topk alternatives
+        # Filter every alternative and return a list
+        # alts of shape (topk, sequence_length)
+        filter_func = lambda alts: [filter_seq2seq_output(s.tolist(), eos_id=eos_id) for s in alts]
+    else:
+        # Filter only the best alternative.
+        # pred of shape (sequence_length,)
+        filter_func = lambda pred: filter_seq2seq_output(pred.tolist(), eos_id=eos_id)
     for p in prediction:
-        res = filter_seq2seq_output(p.tolist(), eos_id=eos_id)
+        # res = filter_seq2seq_output(p.tolist(), eos_id=eos_id)
+        res = filter_func(p)
         outputs.append(res)
     return outputs
 
