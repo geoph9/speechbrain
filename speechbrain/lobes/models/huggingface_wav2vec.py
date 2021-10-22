@@ -7,6 +7,7 @@ https://huggingface.co/transformers/installation.html
 
 Authors
  * Titouan Parcollet 2021
+ * Boumadane Abdelmoumene 2021
 """
 
 import torch
@@ -15,17 +16,25 @@ from torch import nn
 
 # We check if transformers is installed.
 try:
-    from transformers import Wav2Vec2Model, Wav2Vec2Config
+    from transformers import Wav2Vec2Model, HubertModel
+    from transformers import Wav2Vec2Config, HubertConfig
     from transformers import Wav2Vec2FeatureExtractor
 except ImportError:
-    print("Please install transformer from HuggingFace to use wav2vec2!")
+    print(
+        "Please install transformer from HuggingFace to use wav2vec2/Hubert !"
+    )
+
+HF_models = {"wav2vec2": Wav2Vec2Model, "hubert": HubertModel}
+
+HF_config = {"wav2vec2": Wav2Vec2Config, "hubert": HubertConfig}
 
 
 class HuggingFaceWav2Vec2(nn.Module):
     """This lobe enables the integration of HuggingFace
-    pretrained wav2vec2.0 models.
+    pretrained wav2vec2.0/Hubert models.
 
-    Source paper: https://arxiv.org/abs/2006.11477
+    Source paper wav2vec2.0: https://arxiv.org/abs/2006.11477
+    Source paper Hubert: https://arxiv.org/abs/2106.07447
     Transformer from HuggingFace needs to be installed:
     https://huggingface.co/transformers/installation.html
 
@@ -50,6 +59,10 @@ class HuggingFaceWav2Vec2(nn.Module):
     pretrain : bool (default: True)
         If True, the model is pretrained with the specified source.
         If False, the randomly-initialized model is instantiated.
+    apply_spec_augment : bool (default: False)
+        If True, the model will apply spec augment on the output of feature extractor
+        (inside huggingface Wav2VecModel() class).
+        If False, the model will not apply spec augment. We set this to false to prevent from doing it twice.
     Example
     -------
     >>> inputs = torch.rand([10, 600])
@@ -69,6 +82,7 @@ class HuggingFaceWav2Vec2(nn.Module):
         freeze=True,
         freeze_feature_extractor=False,
         pretrain=True,
+        apply_spec_augment=False,
     ):
         super().__init__()
 
@@ -78,16 +92,25 @@ class HuggingFaceWav2Vec2(nn.Module):
             source, cache_dir=save_path
         )
 
+        # Select specific self-supervised loader (eg. Wav2Vec2, Hubert)
+        if "hubert" in source:
+            config = HF_config.get("hubert")
+            model = HF_models.get("hubert")
+        else:
+            config = HF_config.get("wav2vec2")
+            model = HF_models.get("wav2vec2")
+
         # Download the model from HuggingFace.
         # if pretrain is False, we do not download the pretrained weights
         # it it is True, we download and load them.
         if not (pretrain):
-            config = Wav2Vec2Config.from_pretrained(source, cache_dir=save_path)
-            self.model = Wav2Vec2Model(config)
+            config = config.from_pretrained(source, cache_dir=save_path)
+            self.model = model(config)
         else:
-            self.model = Wav2Vec2Model.from_pretrained(
-                source, cache_dir=save_path
-            )
+            self.model = model.from_pretrained(source, cache_dir=save_path)
+
+        # set apply_spec_augment
+        self.model.config.apply_spec_augment = apply_spec_augment
 
         # We check if inputs need to be normalized w.r.t pretrained wav2vec2
         self.normalize_wav = self.feature_extractor.do_normalize
