@@ -18,6 +18,7 @@ with open(os.path.join("speechbrain", "version.txt")) as f:
 
 with open('requirements.txt') as f:
     required = f.read().splitlines()
+required = [p for p in required if not p.startswith("-")]
 
 setup(
     name="speechbrain",
