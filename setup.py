@@ -30,6 +30,7 @@ setup(
     author_email="speechbrain@gmail.com",
     packages=setuptools.find_packages(),
     package_data={"speechbrain": ["version.txt", "log-config.yaml"]},
+    setup_requires=["wheel>=0.37.1"],
     install_requires=required,
     python_requires=">=3.7",
     url="https://speechbrain.github.io/",
