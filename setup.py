@@ -16,6 +16,10 @@ with open("README.md") as f:
 with open(os.path.join("speechbrain", "version.txt")) as f:
     version = f.read().strip()
 
+with open('requirements.txt') as f:
+    required = f.read().splitlines()
+required = [p for p in required if not p.startswith("-")]
+
 setup(
     name="speechbrain",
     version=version,
@@ -26,18 +30,8 @@ setup(
     author_email="speechbrain@gmail.com",
     packages=setuptools.find_packages(),
     package_data={"speechbrain": ["version.txt", "log-config.yaml"]},
-    install_requires=[
-        "hyperpyyaml",
-        "joblib",
-        "numpy",
-        "packaging",
-        "scipy",
-        "sentencepiece",
-        "torch",
-        "torchaudio",
-        "tqdm",
-        "huggingface_hub",
-    ],
+    setup_requires=["wheel>=0.37.1"],
+    install_requires=required,
     python_requires=">=3.7",
     url="https://speechbrain.github.io/",
 )
