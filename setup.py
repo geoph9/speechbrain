@@ -16,12 +16,12 @@ with open("README.md") as f:
 with open(os.path.join("speechbrain", "version.txt")) as f:
     version = f.read().strip()
 
-with open('requirements.txt') as f:
+with open(os.path.join("speechbrain", "requirements.txt")) as f:
     required = f.read().splitlines()
 required = [p for p in required if not p.startswith("-")]
 
 setup(
-    name="speechbrain",
+    name="speechbrain-geoph9",
     version=version,
     description="All-in-one speech toolkit in pure Python and Pytorch",
     long_description=long_description,
@@ -33,7 +33,7 @@ setup(
         "License :: OSI Approved :: Apache Software License",
     ],
     packages=setuptools.find_packages(),
-    package_data={"speechbrain": ["version.txt", "log-config.yaml"]},
+    package_data={"speechbrain": ["version.txt", "log-config.yaml", "requirements.txt"]},
     setup_requires=["wheel>=0.37.1"],
     install_requires=required,
     python_requires=">=3.7",
