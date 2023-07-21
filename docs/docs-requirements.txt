@@ -10,3 +10,5 @@ six
 sphinx-rtd-theme>=0.4.3
 Sphinx>=3.4.3
 transformers
+kenlm
+pyctcdecode
