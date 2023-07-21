@@ -299,6 +299,8 @@ def download_file(
         If True, replaces the existing files.
     """
     try:
+        # make sure all processing reached here before main preocess create dest_dir
+        sb.utils.distributed.ddp_barrier()
         if sb.utils.distributed.if_main_process():
 
             class DownloadProgressBar(tqdm.tqdm):
@@ -416,7 +418,7 @@ def batch_pad_right(tensors: list, mode="constant", value=0):
         return tensors[0].unsqueeze(0), torch.tensor([1.0])
 
     if not (
-        any(
+        all(
             [tensors[i].ndim == tensors[0].ndim for i in range(1, len(tensors))]
         )
     ):
@@ -544,7 +546,7 @@ def split_path(path):
 
     Arguments
     ---------
-    path : str
+    path : str or FetchSource
 
     Returns
     -------
@@ -553,11 +555,22 @@ def split_path(path):
     str
         Filename
     """
-    if "/" in path:
-        return path.rsplit("/", maxsplit=1)
+
+    def split(src):
+        """Core function to split path.
+        """
+        if "/" in src:
+            return src.rsplit("/", maxsplit=1)
+        else:
+            # Interpret as path to file in current directory.
+            return "./", src
+
+    if isinstance(path, sb.pretrained.fetching.FetchSource):
+        fetch_from, fetch_path = path
+        source, filename = split(fetch_path)
+        return sb.pretrained.fetching.FetchSource(fetch_from, source), filename
     else:
-        # Interpret as path to file in current directory.
-        return "./", path
+        return split(path)
 
 
 def scalarize(value):
