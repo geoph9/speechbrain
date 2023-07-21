@@ -1086,8 +1086,13 @@ class Brain:
         return loss.detach().cpu()
 
     def _fit_train(self, train_set, epoch, enable):
-        # Training stage
-        self.on_stage_start(Stage.TRAIN, epoch)
+        # Training stage 
+        # tmp_set = self.on_stage_start(Stage.TRAIN, epoch)
+        # if tmp_set is not None:
+        #     # Modified on_stage_start will also return an updated train_set
+        #     train_set = tmp_set
+        # OR:
+        train_set = self.on_stage_start(Stage.TRAIN, epoch) or train_set
         self.modules.train()
         self.zero_grad()
 

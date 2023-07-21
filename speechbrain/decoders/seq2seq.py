@@ -672,14 +672,15 @@ class S2SBeamSearcher(S2SBaseSearcher):
             top_lengths, dtype=torch.int, device=top_scores.device
         )
         # Get topk indices
-        topk_scores, indices = top_scores.topk(self.topk, dim=-1)
+        topk_scores, indices = top_scores.topk(topk, dim=-1)
         indices = (indices + self.beam_offset.unsqueeze(1)).view(
-            batch_size * self.topk
+            batch_size * topk
         )
         # Select topk hypotheses
         topk_hyps = torch.index_select(top_hyps, dim=0, index=indices,)
-        topk_hyps = topk_hyps.view(batch_size, self.topk, -1)
+        topk_hyps = topk_hyps.view(batch_size, topk, -1)
         topk_lengths = torch.index_select(top_lengths, dim=0, index=indices,)
+
         topk_lengths = topk_lengths.view(batch_size, self.topk)
         topk_log_probs = [top_log_probs[index.item()] for index in indices]
 
@@ -952,7 +953,7 @@ class S2SBeamSearcher(S2SBaseSearcher):
             log_probs,
         ) = self._get_top_score_prediction(hyps_and_scores, topk=self.topk,)
         # pick the best hyp
-        predictions = topk_hyps[:, 0, :]
+        predictions = topk_hyps[:, :self.topk, :]
         predictions = batch_filter_seq2seq_output(
             predictions, eos_id=self.eos_index
         )
@@ -1681,3 +1682,137 @@ def _update_mem(inp_tokens, memory):
     if memory is None:
         return inp_tokens.unsqueeze(1)
     return torch.cat([memory, inp_tokens.unsqueeze(1)], dim=-1)
+
+
+class S2STransformerBeamSearch(S2SBeamSearcher):
+    """This class implements the beam search decoding
+    for Transformer.
+    See also S2SBaseSearcher(), S2SBeamSearcher().
+
+    Arguments
+    ---------
+    model : torch.nn.Module
+        The model to use for decoding.
+    linear : torch.nn.Module
+        A linear output layer.
+    **kwargs
+        Arguments to pass to S2SBeamSearcher
+
+    Example:
+    --------
+    >>> # see recipes/LibriSpeech/ASR_transformer/experiment.py
+    """
+
+    def __init__(
+        self, modules, temperature=1.0, temperature_lm=1.0, **kwargs,
+    ):
+        super(S2STransformerBeamSearch, self).__init__(**kwargs)
+
+        self.model = modules[0]
+        self.fc = modules[1]
+        self.ctc_fc = modules[2]
+        self.softmax = torch.nn.LogSoftmax(dim=-1)
+
+        self.temperature = temperature
+        self.temperature_lm = temperature_lm
+
+    def reset_mem(self, batch_size, device):
+        return None
+
+    def reset_lm_mem(self, batch_size, device):
+        return None
+
+    def permute_mem(self, memory, index):
+        memory = torch.index_select(memory, dim=0, index=index)
+        return memory
+
+    def permute_lm_mem(self, memory, index):
+        memory = torch.index_select(memory, dim=0, index=index)
+        return memory
+
+    def forward_step(self, inp_tokens, memory, enc_states, enc_lens):
+        memory = _update_mem(inp_tokens, memory)
+        pred, attn = self.model.decode(memory, enc_states)
+        prob_dist = self.softmax(self.fc(pred) / self.temperature)
+        return prob_dist[:, -1, :], memory, attn
+
+    def lm_forward_step(self, inp_tokens, memory):
+        memory = _update_mem(inp_tokens, memory)
+        if not next(self.lm_modules.parameters()).is_cuda:
+            self.lm_modules.to(inp_tokens.device)
+        logits = self.lm_modules(memory)
+        log_probs = self.softmax(logits / self.temperature_lm)
+        return log_probs[:, -1, :], memory
+
+
+def batch_filter_seq2seq_output(prediction, eos_id=-1):
+    """Calling batch_size times of filter_seq2seq_output.
+
+    Arguments
+    ---------
+    prediction : list of torch.Tensor
+        A list containing the output ints predicted by the seq2seq system.
+    eos_id : int, string
+        The id of the eos.
+
+    Returns
+    ------
+    list
+        The output predicted by seq2seq model.
+
+    Example
+    -------
+    >>> predictions = [torch.IntTensor([1,2,3,4]), torch.IntTensor([2,3,4,5,6])]
+    >>> predictions = batch_filter_seq2seq_output(predictions, eos_id=4)
+    >>> predictions
+    [[1, 2, 3], [2, 3]]
+    """
+    outputs = []
+    if len(prediction.shape) == 3:  # in this case we have kept the topk alternatives
+        # Filter every alternative and return a list
+        # alts of shape (topk, sequence_length)
+        filter_func = lambda alts: [filter_seq2seq_output(s.tolist(), eos_id=eos_id) for s in alts]
+    else:
+        # Filter only the best alternative.
+        # pred of shape (sequence_length,)
+        filter_func = lambda pred: filter_seq2seq_output(pred.tolist(), eos_id=eos_id)
+    for p in prediction:
+        # res = filter_seq2seq_output(p.tolist(), eos_id=eos_id)
+        res = filter_func(p)
+        outputs.append(res)
+    return outputs
+
+
+def filter_seq2seq_output(string_pred, eos_id=-1):
+    """Filter the output until the first eos occurs (exclusive).
+
+    Arguments
+    ---------
+    string_pred : list
+        A list containing the output strings/ints predicted by the seq2seq system.
+    eos_id : int, string
+        The id of the eos.
+
+    Returns
+    ------
+    list
+        The output predicted by seq2seq model.
+
+    Example
+    -------
+    >>> string_pred = ['a','b','c','d','eos','e']
+    >>> string_out = filter_seq2seq_output(string_pred, eos_id='eos')
+    >>> string_out
+    ['a', 'b', 'c', 'd']
+    """
+    if isinstance(string_pred, list):
+        try:
+            eos_index = next(
+                i for i, v in enumerate(string_pred) if v == eos_id
+            )
+        except StopIteration:
+            eos_index = len(string_pred)
+        string_out = string_pred[:eos_index]
+    else:
+        raise ValueError("The input must be a list.")
+    return string_out
