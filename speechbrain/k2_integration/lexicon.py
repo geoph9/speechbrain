@@ -18,7 +18,7 @@ import logging
 import re
 import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import Generator, List, Tuple
 
 import k2
 import torch
@@ -219,14 +219,18 @@ class Lexicon(object):
                 self.word2idx[word] = int(idx)
                 self.idx2word[int(idx)] = word
         self.word2tids = {}
+        for word, tokens in self.generate_lexicon():
+            tids = [self.token2idx[t] for t in tokens]
+            if word not in self.word2tids:
+                self.word2tids[word] = []
+            self.word2tids[word].append(tids)
+    
+    def generate_lexicon(self):
         with open(self.lang_dir / "lexicon.txt", "r", encoding="utf-8") as f:
             for line in f:
                 word = line.strip().split()[0]
                 tokens = line.strip().split()[1:]
-                tids = [self.token2idx[t] for t in tokens]
-                if word not in self.word2tids:
-                    self.word2tids[word] = []
-                self.word2tids[word].append(tids)
+                yield (word, tokens)
 
     @property
     def tokens(self) -> List[int]:
@@ -276,7 +280,29 @@ class Lexicon(object):
                     tids.append(self.token2idx[sil_token])
             results.append(tids)
         return results
+    
+    def generate_transcript_chars(self, texts: List[str]) -> Generator[str, None, None]:
+        """Generate a tokenized version of each transcript (one line for each
+        utterance). The output is written as a list of strings.
 
+        Args:
+            texts:
+                A list of strings, each string is a transcript.
+
+        Returns:
+            A generator of strings, each string is a tokenized transcript.
+        """
+        lexicon = {}
+        for word, tokens in self.generate_lexicon():
+            lexicon[word] = " ".join(tokens)
+        for line in texts:
+            words = line.strip().split()
+            words = [lexicon[word] for word in words]
+            # tokenized_transcript = " ".join(words)
+            # # Convert from list of string token to list of int token ids
+            # tokenized_transcript = [self.token2idx[token] for token in tokenized_transcript.strip().split()]
+            # yield " ".join([str(token) for token in tokenized_transcript])
+            yield " ".join(words)
 
 
 class UniqLexicon(Lexicon):

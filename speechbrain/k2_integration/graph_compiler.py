@@ -14,7 +14,8 @@ Authors:
 
 import os
 from pathlib import Path
-from typing import Dict, List, Union, Optional
+from abc import ABC, abstractmethod
+from typing import Dict, List, Union, Optional, Tuple
 
 import k2
 import torch
@@ -27,15 +28,14 @@ from speechbrain.k2_integration.utils import get_texts, one_best_decoding, resco
 logger = logging.getLogger(__name__)
 
 
-class CtcTrainingGraphCompiler(object):
+class GraphCompiler(ABC):
     def __init__(
         self,
         lexicon: Lexicon,
         device: torch.device,
         oov: str = "<UNK>",
-        need_repeat_flag: bool = False,
-        G_path: Optional[str] = None,
-        rescoring_lm_path: Union[Path, str, None] = None,
+        G_path: str = None,
+        rescoring_lm_path: Union[Path, str] = None,
     ):
         """
         Args:
@@ -46,13 +46,6 @@ class CtcTrainingGraphCompiler(object):
           oov:
             Out of vocabulary word. When a word in the transcript
             does not exist in the lexicon, it is replaced with `oov`.
-          need_repeat_flag:
-            If True, will add an attribute named `_is_repeat_token_` to ctc_topo
-            indicating whether this token is a repeat token in ctc graph.
-            This attribute is needed to implement delay-penalty for phone-based
-            ctc loss. See https://github.com/k2-fsa/k2/pull/1086 for more
-            details. Note: The above change MUST be included in k2 to enable this
-            flag.
           G_path: str
             Path to the language model FST to be used in the decoding-graph creation.
             If None, then we assume that the language model is not used.
@@ -71,16 +64,6 @@ class CtcTrainingGraphCompiler(object):
         self.L = k2.arc_sort(L)
         self.oov_id = lexicon.word_table[oov]
         self.word_table = lexicon.word_table
-
-        max_token_id = max(lexicon.tokens)
-        ctc_topo = k2.ctc_topo(max_token_id, modified=False)
-
-        self.ctc_topo = ctc_topo.to(device)
-
-        if need_repeat_flag:
-            self.ctc_topo._is_repeat_token_ = (
-                self.ctc_topo.labels != self.ctc_topo.aux_labels
-            )
 
         self.device = device
         self.G_path: str = G_path
@@ -149,6 +132,79 @@ class CtcTrainingGraphCompiler(object):
         if not hasattr(G, "lm_scores"):
             G.lm_scores = G.scores.clone()
         return G
+    
+    @abstractmethod
+    def compile(
+            self,
+            texts: List[str],
+            *args, **kwargs
+        ) -> Union[k2.Fsa, Tuple[k2.Fsa, k2.Fsa]]:
+        """Build decoding graphs by composing ctc_topo with
+        given transcripts.
+        
+        Args:
+          texts:
+            A list of strings. Each string contains a sentence for an utterance.
+        
+        Returns:
+          An FsaVec, the composition result of `self.ctc_topo` and the
+          transcript FSA.
+          With MMI training, we need to return two FsaVecs, one for the numerator
+          and one for the denominator.
+        """
+        pass
+
+
+class CtcTrainingGraphCompiler(GraphCompiler):
+    def __init__(
+        self,
+        lexicon: Lexicon,
+        device: torch.device,
+        oov: str = "<UNK>",
+        need_repeat_flag: bool = False,
+        G_path: str = None,
+        rescoring_lm_path: Union[Path, str] = None,
+    ):
+        """
+        Args:
+          lexicon: Lexicon
+            It is built from `data/lang/lexicon.txt`.
+          device: torch.device | str
+            The device to use for operations compiling transcripts to FSAs.
+          oov: str
+            Out of vocabulary word. When a word in the transcript
+            does not exist in the lexicon, it is replaced with `oov`.
+          need_repeat_flag: bool
+            If True, will add an attribute named `_is_repeat_token_` to ctc_topo
+            indicating whether this token is a repeat token in ctc graph.
+            This attribute is needed to implement delay-penalty for phone-based
+            ctc loss. See https://github.com/k2-fsa/k2/pull/1086 for more
+            details. Note: The above change MUST be included in k2 to open this
+            flag.
+          G_path: str
+            Path to the language model FST to be used in the decoding-graph creation.
+            If None, then we assume that the language model is not used.
+          rescoring_lm_path: Path | str
+            Path to the language model FST to be used in the rescoring of the decoding
+            graph. If None, then we assume that the language model is not used.
+        """
+        
+        super().__init__(
+            lexicon=lexicon,
+            device=device,
+            oov=oov,
+            G_path=G_path,
+            rescoring_lm_path=rescoring_lm_path,
+        )
+        max_token_id = max(lexicon.tokens)
+        ctc_topo = k2.ctc_topo(max_token_id, modified=False)
+
+        self.ctc_topo = ctc_topo.to(device)
+
+        if need_repeat_flag:
+            self.ctc_topo._is_repeat_token_ = (
+                self.ctc_topo.labels != self.ctc_topo.aux_labels
+            )
 
     def compile(self, texts: List[str]) -> k2.Fsa:
         """Build decoding graphs by composing ctc_topo with

@@ -1,6 +1,11 @@
 # Copyright      2023 the University of Edinburgh (Zeyu Zhao)
+from typing import List
+
 import k2
 import torch
+from torch import nn
+
+from .graph_compiler import GraphCompiler
 
 
 def ctc_k2(log_probs,
@@ -104,3 +109,105 @@ def k2_ctc(log_probs, targets, input_lens, target_lens, reduction="mean"):
         target_lengths=target_lens,
     )
     return loss
+
+def mmi_k2(
+        log_probs,
+        input_lens,
+        graph_compiler,
+        texts,
+        subsampling_factor=1,
+        beam_size=10,
+        is_training=True,
+        den_scale=1.0,
+    ):
+    input_lens = (input_lens * log_probs.shape[1]).round().int()
+
+    batch_size = log_probs.shape[0]
+
+    supervision_segments = torch.tensor(
+        [
+            [i, 0, torch.floor(input_lens[i]/subsampling_factor).item()] \
+                for i in range(batch_size)
+        ],
+        device="cpu",
+        dtype=torch.int32,
+    )
+
+    dense_fsa_vec = k2.DenseFsaVec(
+        log_probs,
+        supervision_segments,
+        allow_truncate=subsampling_factor-1,
+    )
+    loss_fn = LFMMILoss(
+        graph_compiler=graph_compiler,
+        den_scale=den_scale,
+        beam_size=beam_size,
+    )
+    mmi_loss = loss_fn(dense_fsa_vec=dense_fsa_vec, texts=texts)
+
+    assert mmi_loss.requires_grad == is_training
+
+    return mmi_loss
+
+class LFMMILoss(nn.Module):
+    """
+    Computes Lattice-Free Maximum Mutual Information (LFMMI) loss.
+
+    TODO: more detailed description
+    """
+
+    def __init__(
+        self,
+        graph_compiler: GraphCompiler,
+        den_scale: float = 1.0,
+        beam_size: float = 8.0,
+    ):
+        super().__init__()
+        self.graph_compiler = graph_compiler
+        self.den_scale = den_scale
+        self.beam_size = beam_size
+
+    def forward(
+        self,
+        dense_fsa_vec: k2.DenseFsaVec,
+        texts: List[str],
+    ) -> torch.Tensor:
+        """
+        Args:
+          dense_fsa_vec:
+            It contains the neural network output.
+          texts:
+            A list of strings. Each string contains space(s) separated words.
+        Returns:
+            Return a scalar loss. It is the sum over utterances in a batch,
+            without normalization.
+    
+        Disclaimer:
+            This function is adapted from the `icefall` repository.
+            See icefall/icefall/mmi.py for the original source code.
+            This is the non-optimized version of the mmi computation.
+        """
+
+        num_graphs, den_graphs = self.graph_compiler.compile(texts, replicate_den=True)
+
+        # TODO: pass output_beam as function argument
+        num_lats = k2.intersect_dense(
+            num_graphs, dense_fsa_vec, output_beam=self.beam_size, max_arcs=2147483600
+        )
+        den_lats = k2.intersect_dense(
+            den_graphs, dense_fsa_vec, output_beam=self.beam_size, max_arcs=2147483600
+        )
+
+        num_tot_scores = num_lats.get_tot_scores(log_semiring=True, use_double_scores=True)
+
+        den_tot_scores = den_lats.get_tot_scores(log_semiring=True, use_double_scores=True)
+
+        tot_scores = num_tot_scores - self.den_scale * den_tot_scores
+
+        loss = -1 * tot_scores.sum()
+        if loss.item() > 2000:
+            print(f"==> {tot_scores=}")
+            print(f"==> {num_tot_scores=}")  ## it's always the num that is -inf
+            print(f"==> {den_tot_scores=}")
+            print(f"=========> {num_lats=}")
+        return loss
