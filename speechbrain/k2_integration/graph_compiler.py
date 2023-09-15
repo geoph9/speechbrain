@@ -456,7 +456,7 @@ class CtcTrainingGraphCompiler(GraphCompiler):
             texts = []
             for wids in hyps:
                 texts.append(" ".join([self.word_table[wid]
-                            for wid in wids]))
+                            for wid in wids if wid != self.oov_id]))
             return texts
 
         with torch.no_grad():

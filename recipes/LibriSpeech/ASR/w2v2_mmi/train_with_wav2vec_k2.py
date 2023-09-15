@@ -29,6 +29,9 @@ import speechbrain as sb
 from speechbrain.utils.distributed import run_on_main, if_main_process
 from hyperpyyaml import load_hyperpyyaml
 from pathlib import Path
+from tqdm.contrib import tqdm
+from speechbrain.dataio.dataloader import LoopedLoader
+from torch.utils.data import DataLoader
 
 from speechbrain.k2_integration.prepare_lang import prepare_lang
 from speechbrain.k2_integration.lexicon import Lexicon
@@ -76,9 +79,13 @@ class ASR(sb.Brain):
 
         # Upsample the inputs if they have been highly downsampled
         if hasattr(self.hparams, "upsampling") and self.hparams.upsampling:
-            logits = logits.view(
-                logits.shape[0], -1, self.hparams.output_neurons
-            )
+            # do the upsampling only if the last dimension is not equal to the number of output neurons
+            if logits.shape[-1] != self.hparams.output_neurons:
+                old_shape = logits.shape
+                logits = logits.view(
+                    logits.shape[0], -1, self.hparams.output_neurons
+                )
+                logger.info(f"Upsampling from {old_shape} to {logits.shape}")
 
         p_ctc = self.hparams.log_softmax(logits)
         return p_ctc, wav_lens
@@ -107,17 +114,20 @@ class ASR(sb.Brain):
             raise NotImplementedError("Only ascending or descending sorting is implemented, but got {}".format(self.hparams.sorting))
 
         is_training = (stage == sb.Stage.TRAIN)
-        loss_ctc = self.hparams.mmi_cost(
-            log_probs=p_ctc, 
-            input_lens=wav_lens, 
-            graph_compiler=self.graph_compiler,
-            texts=texts,
-            is_training=is_training,
-        )
+        if stage == sb.Stage.TEST:
+            loss = None
+        else:
+            loss_ctc = self.hparams.mmi_cost(
+                log_probs=p_ctc, 
+                input_lens=wav_lens, 
+                graph_compiler=self.graph_compiler,
+                texts=texts,
+                is_training=is_training,
+            )
 
-        loss = loss_ctc
-        if loss.item() > 1000:
-            logger.warning(f"Loss exploded to {loss.item()} on id {ids[0]}.")
+            loss = loss_ctc
+            if loss.item() > 1000:
+                logger.warning(f"Loss exploded to {loss.item()} on id {ids[0]}.")
         # print(f"loss: {loss.item()}, {loss.requires_grad=}, duration: {batch.duration}")
 
 
@@ -297,6 +307,77 @@ class ASR(sb.Brain):
                             "w",
                         ) as w:
                             self.wer_metric[i].write_stats(w)
+    
+    def evaluate(
+        self,
+        test_set,
+        max_key=None,
+        min_key=None,
+        progressbar=None,
+        test_loader_kwargs={},
+    ):
+        """Iterate test_set and evaluate brain performance. By default, loads
+        the best-performing checkpoint (as recorded using the checkpointer).
+
+        Arguments
+        ---------
+        test_set : Dataset, DataLoader
+            If a DataLoader is given, it is iterated directly. Otherwise passed
+            to ``self.make_dataloader()``.
+        max_key : str
+            Key to use for finding best checkpoint, passed to
+            ``on_evaluate_start()``.
+        min_key : str
+            Key to use for finding best checkpoint, passed to
+            ``on_evaluate_start()``.
+        progressbar : bool
+            Whether to display the progress in a progressbar.
+        test_loader_kwargs : dict
+            Kwargs passed to ``make_dataloader()`` if ``test_set`` is not a
+            DataLoader. NOTE: ``loader_kwargs["ckpt_prefix"]`` gets
+            automatically overwritten to ``None`` (so that the test DataLoader
+            is not added to the checkpointer).
+
+        Returns
+        -------
+        average test loss
+        """
+        if progressbar is None:
+            progressbar = not self.noprogressbar
+
+        if not (
+            isinstance(test_set, DataLoader)
+            or isinstance(test_set, LoopedLoader)
+        ):
+            test_loader_kwargs["ckpt_prefix"] = None
+            test_set = self.make_dataloader(
+                test_set, sb.Stage.TEST, **test_loader_kwargs
+            )
+        self.on_evaluate_start(max_key=max_key, min_key=min_key)
+        self.on_stage_start(sb.Stage.TEST, epoch=None)
+        self.modules.eval()
+        with torch.no_grad():
+            for batch in tqdm(
+                test_set,
+                dynamic_ncols=True,
+                disable=not progressbar,
+                colour=self.tqdm_barcolor["test"],
+            ):
+                self.step += 1
+                _ = self.evaluate_batch(batch, stage=sb.Stage.TEST)
+
+                # Profile only if desired (steps allow the profiler to know when all is warmed up)
+                if self.profiler is not None:
+                    if self.profiler.record_steps:
+                        self.profiler.step()
+
+                # Debug mode only runs a few batches
+                if self.debug and self.step == self.debug_batches:
+                    break
+
+            self.on_stage_end(sb.Stage.TEST, None, None)
+        self.step = 0
+        return
 
     def init_optimizers(self):
         "Initializes the wav2vec2 optimizer and model optimizer"
@@ -446,7 +527,7 @@ def get_lexicon(lang_dir,
             for line in f:
                 # Split the line 
                 try:
-                    _, _, _, _, _, trans = line.strip().split(",")
+                    _, _, _, _, trans = line.strip().split(",")
                 except ValueError as e:
                     print(line.strip().split(","))
                     raise e

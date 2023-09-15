@@ -220,9 +220,6 @@ class LFMMILoss(nn.Module):
         else:
             loss = -1 * tot_scores.sum()
         if loss.item() > 2000:
-            print(f"==> {tot_scores=}")
-            print(f"==> {num_tot_scores=}")  ## it's always the num that is -inf
+            print(f"==> {num_tot_scores=}", end="   ")  ## it's always the num that is -inf
             print(f"==> {den_tot_scores=}")
-            print(f"=========> {num_lats=}")
-            print(f"=========> {self.beam_size=}")
         return loss
