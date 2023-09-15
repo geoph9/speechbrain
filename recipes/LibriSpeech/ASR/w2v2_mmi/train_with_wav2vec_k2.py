@@ -68,11 +68,10 @@ class ASR(sb.Brain):
             ]
         else:  # HuggingFace pretrained model
             feats = self.modules.wav2vec2(wavs, wav_lens)
-
+        # print(f"feats: {feats.shape} -- {feats.shape[1]/batch.duration} -- id: {batch.id[0]}")
         x = self.modules.enc(feats)
 
         # Compute outputs
-        p_tokens = None
         logits = self.modules.ctc_lin(x)
 
         # Upsample the inputs if they have been highly downsampled
@@ -82,17 +81,12 @@ class ASR(sb.Brain):
             )
 
         p_ctc = self.hparams.log_softmax(logits)
-        if stage == sb.Stage.VALID or (
-            stage == sb.Stage.TEST and not self.hparams.use_language_modelling
-        ):
-
-            p_tokens = None
-        return p_ctc, wav_lens, p_tokens
+        return p_ctc, wav_lens
 
     def compute_objectives(self, predictions, batch, stage):
         """Computes the loss (CTC+NLL) given predictions and targets."""
 
-        p_ctc, wav_lens, predicted_tokens = predictions
+        p_ctc, wav_lens = predictions
 
         ids = batch.id
         # tokens, tokens_lens = batch.tokens
@@ -124,7 +118,7 @@ class ASR(sb.Brain):
         loss = loss_ctc
         if loss.item() > 1000:
             logger.warning(f"Loss exploded to {loss.item()} on id {ids[0]}.")
-        print(f"loss: {loss.item()}, {loss.requires_grad=}, duration: {batch.duration}")
+        # print(f"loss: {loss.item()}, {loss.requires_grad=}, duration: {batch.duration}")
 
 
         if stage == sb.Stage.VALID:
@@ -133,7 +127,7 @@ class ASR(sb.Brain):
                 p_ctc,
                 wav_lens,
                 ac_scale=self.hparams.ac_scale,
-                decoding_method="1best"
+                stage=stage,
             ) # list of strings
             predicted_words = [wrd.split(" ") for wrd in predicted_texts]
             target_words = [wrd.split(" ") for wrd in texts]
@@ -145,7 +139,6 @@ class ASR(sb.Brain):
                     "Language modelling is not implemented for models trained with k2"
                 )
             else:
-                decoding_method=getattr(asr_brain.hparams, "decoding_method", "1best")
                 # If the decoding method is 1best then the metric stats will be
                 # saved in a single file, otherwise, a new directory will be created
                 # for each lm_scale used in whole lattice rescoring.
@@ -157,11 +150,11 @@ class ASR(sb.Brain):
                     ac_scale=self.hparams.ac_scale,
                     max_active_states=self.hparams.test_max_active_state,
                     is_test=True,
-                    decoding_method=decoding_method,
                     lm_scale_list=self.hparams.lm_scale_list,
+                    stage=stage,
                 ) # list of strings
                 target_words: List[List[str]] = [wrd.split(" ") for wrd in texts]
-                if decoding_method == "1best":
+                if self.graph_compiler.decoding_method == "1best":
                     predicted_words: List[List[str]] = [wrd.split(" ") for wrd in decode_output]
                     self.wer_metric.append(ids, predicted_words, target_words)
                     self.cer_metric.append(ids, predicted_words, target_words)
@@ -536,6 +529,7 @@ def arpa_to_fst(
         if not arpa_path.exists():
             raise FileNotFoundError(f"{arpa_path} not found while trying to create the {max_order} FST.")
         try:
+            logger.info("Converting {} to FST".format(arpa_path))
             s = arpa2fst(
                 input_arpa=str(arpa_path),
                 disambig_symbol=disambig_symbol,
@@ -552,10 +546,6 @@ def arpa_to_fst(
     arpa_path = arpa_dir / "3-gram.pruned.1e-7.arpa"
     fst_path = output_dir / "G_3_gram.fst.txt"
     _arpa_to_fst_single(arpa_path, fst_path, max_order=3)
-    # # P (bigram token level) arpa to fst conversion
-    # arpa_path = arpa_dir / "P.arpa"
-    # fst_path = output_dir / "P.fst.txt"
-    # _arpa_to_fst_single(arpa_path, fst_path, max_order=2)
     # Optionnal 4-gram arpa to fst conversion
     if convert_4gram:
         # arpa_path = arpa_dir / "4-gram.arpa"
@@ -570,7 +560,10 @@ def create_P_fst(
         tokens_txt: str,
         disambig_symbol: str = "#0",
     ):
-    """Create the P.arpa for LF-MMI.
+    """Create the P.fst.txt for LF-MMI. The reason we don't use `arpa_to_fst`
+    is because this is a token-level LM (e.g. phone/word-piece/character LM).
+    TODO: This could still be merged in `arpa_to_fst` by adding an extra
+          `read_symbol_table` argument.
 
     Args:
         lexicon: The lexicon object used to get the tokenized version of 
@@ -709,7 +702,6 @@ if __name__ == "__main__":
     #       method is whole-lattice-rescoring, then G_3_gram.fst.txt will still be created).
     if need_G or need_4gram:
         # Create the G_3_gram.fst.txt for k2 decoding and G_4_gram.fst.txt for k2 rescoring
-        logger.info("Converting arpa LM to FST (if needed)")
         run_on_main(
             arpa_to_fst,
             kwargs={
@@ -740,6 +732,7 @@ if __name__ == "__main__":
         G_path=G_path,
         P_path=Path(asr_brain.hparams.lm_dir) / "P.fst.txt",
         rescoring_lm_path=rescoring_lm_path,
+        decoding_method=asr_brain.hparams.decoding_method,
     )
 
     # Add attributes to asr_brain

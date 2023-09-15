@@ -23,6 +23,7 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
         rescoring_lm_path: Union[Path, str] = None,
         sos_id: int = 1,
         eos_id: int = 1,
+        decoding_method: str = "1best",
     ):
         """
         Args:
@@ -53,6 +54,8 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
             ID of the start-of-sentence token.
           eos_id: int
             ID of the end-of-sentence token.
+          decoding_method: str
+            One of 1best, whole-lattice-rescoring, or nbest.
         """
         super().__init__(
             lexicon=lexicon,
@@ -61,6 +64,7 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
             need_repeat_flag=need_repeat_flag,
             G_path=G_path,
             rescoring_lm_path=rescoring_lm_path,
+            decoding_method=decoding_method,
         )
         self.sos_id = sos_id
         self.eos_id = eos_id
@@ -73,6 +77,18 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
     def P(self) -> k2.Fsa:
         if self._p is not None:
             return self._p
+        # def create_flower_fst():
+        #     with open(self.lexicon.lang_dir / "tokens.txt", "r") as f:
+        #         mapping = {w.split()[0]: w.split()[1] for w in f.readlines()}
+        #     fst = "\n"
+        #     for value in mapping.values():
+        #         fst += f"0 0 {value} {value}\n"
+        #     fst += "0"
+        #     return fst
+
+        # flower_fst = create_flower_fst()
+        # self._p = k2.Fsa.from_str(flower_fst, acceptor=False, openfst=True)
+        
         with open(self.P_path) as f:
             # P is not an acceptor because there is
             # a back-off state, whose incoming arcs
@@ -87,7 +103,7 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
         """
         # Note: there is no need to save a pre-compiled P and ctc_topo
         # as it is very fast to generate them.
-        logging.info(f"Loading P from lexicon ({self.P_path})")
+        logger.info(f"Loading P from lexicon ({self.P_path})")
         P = self.P
         
         first_token_disambig_id = self.lexicon.token_table["#0"]
@@ -110,19 +126,19 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
         P_with_self_loops = k2.add_epsilon_self_loops(P)
 
         max_token_id = max(self.lexicon.tokens)
-        logging.info(
+        logger.info(
             f"Building ctc_topo (modified=False). max_token_id: {max_token_id}"
         )
 
         ctc_topo_inv = k2.arc_sort(self.ctc_topo.invert_())
 
-        logging.info("Building ctc_topo_P")
+        logger.info("Building ctc_topo_P")
         ctc_topo_P = k2.intersect(
             ctc_topo_inv, P_with_self_loops, treat_epsilons_specially=False
         ).invert()
 
         self.ctc_topo_P = k2.arc_sort(ctc_topo_P)
-        logging.info(f"ctc_topo_P num_arcs: {self.ctc_topo_P.num_arcs}")
+        logger.info(f"ctc_topo_P num_arcs: {self.ctc_topo_P.num_arcs}")
 
     def compile(
         self, texts: Iterable[str], replicate_den: bool = True
@@ -175,6 +191,12 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
         num = k2.connect(num)
 
         num = k2.arc_sort(num)
+
+        # print("............... drawing.......................")
+        # n0 = num[0]
+        # n0.labels_sym = self.lexicon.token_table
+        # n0.aux_labels_sym = self.lexicon.token_table
+        # n0.draw("tmp_num_test.svg")
 
         ctc_topo_P_vec = k2.create_fsa_vec([self.ctc_topo_P])
         if replicate_den:

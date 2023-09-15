@@ -114,9 +114,10 @@ log_softmax: !new:speechbrain.nnet.activations.Softmax
    apply_log: True
 
 mmi_cost: !name:speechbrain.k2_integration.losses.mmi_k2
-   beam_size: 10
+   beam_size: 100
    den_scale: 1.0
    subsampling_factor: !ref <subsample_factor>
+   reduction: mean
 
 modules:
    wav2vec2: !ref <wav2vec2>
@@ -168,7 +169,7 @@ lang_dir: !ref <output_folder>/lang
 vocab_file: !ref <data_folder>/librispeech-vocab.txt
 sil_prob: 0.
 add_word_boundary: True
-subsample_factor: 4
+subsample_factor: 1
 # For k2 decoding
 test_search_beam: 32
 # Beam size (for decoding)
@@ -183,5 +184,8 @@ decoding_method: whole-lattice-rescoring
 # They can be in either ARPA or FST format. If the former, then 
 # the FST equivalent will be created in the same directory by
 # using kaldilm.
+# In addition, if a P.fst.txt does not exist in lm_dir then we
+# will first create a 2-gram character-levelP.arpa (see
+# make_kn_lm.py) and then convert it to P.fst.txt using kaldilm.
 lm_dir: lm
 lm_scale_list: [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4]

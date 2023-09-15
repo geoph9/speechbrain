@@ -119,6 +119,7 @@ def mmi_k2(
         beam_size=10,
         is_training=True,
         den_scale=1.0,
+        reduction="mean",
     ):
     input_lens = (input_lens * log_probs.shape[1]).round().int()
 
@@ -142,8 +143,9 @@ def mmi_k2(
         graph_compiler=graph_compiler,
         den_scale=den_scale,
         beam_size=beam_size,
+        reduction=reduction,
     )
-    mmi_loss = loss_fn(dense_fsa_vec=dense_fsa_vec, texts=texts)
+    mmi_loss = loss_fn(dense_fsa_vec=dense_fsa_vec, texts=texts, input_lens=input_lens)
 
     assert mmi_loss.requires_grad == is_training
 
@@ -161,16 +163,19 @@ class LFMMILoss(nn.Module):
         graph_compiler: GraphCompiler,
         den_scale: float = 1.0,
         beam_size: float = 8.0,
+        reduction: str = "mean",
     ):
         super().__init__()
         self.graph_compiler = graph_compiler
         self.den_scale = den_scale
         self.beam_size = beam_size
+        self.reduction = reduction
 
     def forward(
         self,
         dense_fsa_vec: k2.DenseFsaVec,
         texts: List[str],
+        input_lens: torch.Tensor,
     ) -> torch.Tensor:
         """
         Args:
@@ -178,6 +183,9 @@ class LFMMILoss(nn.Module):
             It contains the neural network output.
           texts:
             A list of strings. Each string contains space(s) separated words.
+          input_lens:
+            A 1-D tensor of dtype ``torch.int32`` containing the lengths of
+            neural network output. Must have ``input_lens.dim() == 1``.
         Returns:
             Return a scalar loss. It is the sum over utterances in a batch,
             without normalization.
@@ -204,10 +212,17 @@ class LFMMILoss(nn.Module):
 
         tot_scores = num_tot_scores - self.den_scale * den_tot_scores
 
-        loss = -1 * tot_scores.sum()
+        if self.reduction == "mean":
+            # If reduction is mean then we need to divide the loss of
+            # each utterance by its length.
+            # loss = mmi_loss / input_lens
+            loss = -1 * tot_scores / input_lens.to(tot_scores.dtype).to(tot_scores.device)
+        else:
+            loss = -1 * tot_scores.sum()
         if loss.item() > 2000:
             print(f"==> {tot_scores=}")
             print(f"==> {num_tot_scores=}")  ## it's always the num that is -inf
             print(f"==> {den_tot_scores=}")
             print(f"=========> {num_lats=}")
+            print(f"=========> {self.beam_size=}")
         return loss

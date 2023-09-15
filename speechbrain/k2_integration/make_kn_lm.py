@@ -14,26 +14,24 @@
 #
 # The data structure is based on: kaldi/egs/wsj/s5/utils/lang/make_phone_lm.py
 # The smoothing algorithm is based on: http://www.speech.sri.com/projects/srilm/manpages/ngram-discount.7.html
-"""
-Full credits go to icefall's implementation (egs/librispeech/ASR/shared/make_kn_lm.py)
-"""
-import argparse
+
 import io
 import math
 import os
 import re
 import sys
+import logging
 from collections import Counter, defaultdict
+from typing import Iterable, List
 
+
+logger = logging.getLogger(__name__)
 # For encoding-agnostic scripts, we assume byte stream as input.
 # Need to be very careful about the use of strip() and split()
 # in this case, because there is a latin-1 whitespace character
 # (nbsp) which is part of the unicode encoding range.
 # Ref: kaldi/egs/wsj/s5/utils/lang/bpe/prepend_words.py @ 69cd717
 DEFAULT_ENCODING = "latin-1"
-
-STRIP_CHARS = " \t\r\n"
-WHITESPACE = re.compile("[ \t]+")
 
 
 class CountsForHistory:
@@ -84,13 +82,15 @@ class NgramCounts:
     # accumulating the 4-gram count for the '8' in the sequence '5 6 7 8', we'd
     # do as follows: self.counts[3][[5,6,7]][8] += 1.0 where the [3] indexes an
     # array, the [[5,6,7]] indexes a dict, and the [8] indexes a dict.
-    def __init__(self, ngram_order, bos_symbol="<s>", eos_symbol="</s>", verbose=False):
+    def __init__(self, ngram_order, bos_symbol="<s>", eos_symbol="</s>"):
         assert ngram_order >= 2
 
         self.ngram_order = ngram_order
         self.bos_symbol = bos_symbol
         self.eos_symbol = eos_symbol
-        self.verbose = verbose
+
+        self.strip_chars = " \t\r\n"
+        self.whitespace = re.compile("[ \t]+")
 
         self.counts = []
         for n in range(ngram_order):
@@ -113,7 +113,7 @@ class NgramCounts:
         if line == "":
             words = [self.bos_symbol, self.eos_symbol]
         else:
-            words = [self.bos_symbol] + WHITESPACE.split(line) + [self.eos_symbol]
+            words = [self.bos_symbol] + self.whitespace.split(line) + [self.eos_symbol]
 
         for i in range(len(words)):
             for n in range(1, self.ngram_order + 1):
@@ -134,31 +134,42 @@ class NgramCounts:
         # byte stream as input
         infile = io.TextIOWrapper(sys.stdin.buffer, encoding=DEFAULT_ENCODING)
         for line in infile:
-            line = line.strip(STRIP_CHARS)
+            line = line.strip(self.strip_chars)
             self.add_raw_counts_from_line(line)
             lines_processed += 1
-        if lines_processed == 0 or self.verbose > 0:
-            print(
-                "make_phone_lm.py: processed {0} lines of input".format(
-                    lines_processed
-                ),
-                file=sys.stderr,
+        logger.debug(
+            "make_phone_lm.py: processed {0} lines of input".format(
+                lines_processed
             )
+        )
 
     def add_raw_counts_from_file(self, filename):
         lines_processed = 0
         with open(filename, encoding=DEFAULT_ENCODING) as fp:
             for line in fp:
-                line = line.strip(STRIP_CHARS)
+                line = line.strip(self.strip_chars)
                 self.add_raw_counts_from_line(line)
                 lines_processed += 1
-        if lines_processed == 0 or self.verbose > 0:
-            print(
-                "make_phone_lm.py: processed {0} lines of input".format(
-                    lines_processed
-                ),
-                file=sys.stderr,
+        logger.debug(
+            "make_phone_lm.py: processed {0} lines of input".format(
+                lines_processed
             )
+        )
+
+    def add_raw_counts_from_list_of_strs(self, list_of_tokens: Iterable[str]):
+        lines_processed = 0
+        for line in list_of_tokens:
+            line = line.strip(self.strip_chars)
+            # print("Using line: ", line)
+            self.add_raw_counts_from_line(line)
+            lines_processed += 1
+            # if lines_processed == 10:
+            #     raise
+        logger.debug(
+            "make_phone_lm.py: processed {0} lines of input".format(
+                lines_processed
+            )
+        )
 
     def cal_discounting_constants(self):
         # For each order N of N-grams, we calculate discounting constant D_N = n1_N / (n1_N + 2 * n2_N),
@@ -284,7 +295,7 @@ class NgramCounts:
             for hist, counts_for_hist in this_order_counts.items():
                 for w in counts_for_hist.word_to_count.keys():
                     ngram = " ".join(hist) + " " + w
-                    ngram = ngram.strip(STRIP_CHARS)
+                    ngram = ngram.strip(self.strip_chars)
 
                     res.append(
                         "{0}\t{1}".format(ngram, counts_for_hist.word_to_count[w])
@@ -301,7 +312,7 @@ class NgramCounts:
             for hist, counts_for_hist in this_order_counts.items():
                 for w in counts_for_hist.word_to_count.keys():
                     ngram = " ".join(hist) + " " + w
-                    ngram = ngram.strip(STRIP_CHARS)
+                    ngram = ngram.strip(self.strip_chars)
 
                     modified_count = len(counts_for_hist.word_to_context[w])
                     raw_count = counts_for_hist.word_to_count[w]
@@ -322,7 +333,7 @@ class NgramCounts:
             for hist, counts_for_hist in this_order_counts.items():
                 for w in counts_for_hist.word_to_count.keys():
                     ngram = " ".join(hist) + " " + w
-                    ngram = ngram.strip(STRIP_CHARS)
+                    ngram = ngram.strip(self.strip_chars)
 
                     f = counts_for_hist.word_to_f[w]
                     if f == 0:  # f(<s>) is always 0
@@ -341,7 +352,7 @@ class NgramCounts:
             for hist, counts_for_hist in this_order_counts.items():
                 for w in counts_for_hist.word_to_count.keys():
                     ngram = " ".join(hist) + " " + w
-                    ngram = ngram.strip(STRIP_CHARS)
+                    ngram = ngram.strip(self.strip_chars)
 
                     f = counts_for_hist.word_to_f[w]
                     if f == 0:  # f(<s>) is always 0
@@ -360,11 +371,8 @@ class NgramCounts:
         for r in res:
             print(r)
 
-    def print_as_arpa(
-        self, fout=io.TextIOWrapper(sys.stdout.buffer, encoding="latin-1")
-    ):
+    def print_as_arpa(self, fout):
         # print as ARPA format.
-
         print("\\data\\", file=fout)
         for hist_len in range(self.ngram_order):
             # print the number of n-grams.
@@ -403,9 +411,70 @@ class NgramCounts:
             print("", file=fout)
         print("\\end\\", file=fout)
 
+    def save_to_file(self, out_file, encoding=DEFAULT_ENCODING):
+        with open(out_file, "w", encoding=encoding) as fw:
+            # save as ARPA format.
+            fw.write("\\data\\\n")
+            for hist_len in range(self.ngram_order):
+                # print the number of n-grams.
+                fw.write(
+                    "ngram {0}={1}\n".format(
+                        hist_len + 1,
+                        sum(
+                            [
+                                len(counts_for_hist.word_to_f)
+                                for counts_for_hist in self.counts[hist_len].values()
+                            ]
+                        ),
+                    ),
+                )
+
+            fw.write("\n")
+
+            for hist_len in range(self.ngram_order):
+                fw.write("\\{0}-grams:\n".format(hist_len + 1))
+
+                this_order_counts = self.counts[hist_len]
+                for hist, counts_for_hist in this_order_counts.items():
+                    for word in counts_for_hist.word_to_count.keys():
+                        ngram = hist + (word,)
+                        prob = counts_for_hist.word_to_f[word]
+                        bow = counts_for_hist.word_to_bow[word]
+
+                        if prob == 0:  # f(<s>) is always 0
+                            prob = 1e-99
+
+                        line = "{0}\t{1}".format("%.7f" % math.log10(prob), " ".join(ngram))
+                        if bow is not None:
+                            line += "\t{0}".format("%.7f" % math.log10(bow))
+                        fw.write(line + "\n")
+                fw.write("\n")
+            fw.write("\\end\\\n")
+
+
+def make_kn_lm(text, lm, ngram_order):
+
+    ngram_counts = NgramCounts(ngram_order)
+
+    if text is None:
+        ngram_counts.add_raw_counts_from_standard_input()
+    elif isinstance(text, Iterable):
+        ngram_counts.add_raw_counts_from_list_of_strs(text)
+    else:
+        assert os.path.isfile(text)
+        ngram_counts.add_raw_counts_from_file(text)
+
+    ngram_counts.cal_discounting_constants()
+    ngram_counts.cal_f()
+    ngram_counts.cal_bow()
+
+    if lm is None:
+        ngram_counts.print_as_arpa(io.TextIOWrapper(sys.stdout.buffer, encoding="latin-1"))
+    else:
+        ngram_counts.save_to_file(out_file=lm, encoding=DEFAULT_ENCODING)
 
 if __name__ == "__main__":
-
+    import argparse
     parser = argparse.ArgumentParser(
         description="""
         Generate kneser-ney language model as arpa format. By default,
@@ -427,21 +496,4 @@ if __name__ == "__main__":
         "-verbose", type=int, default=0, choices=[0, 1, 2, 3, 4, 5], help="Verbose level"
     )
     args = parser.parse_args()
-
-    ngram_counts = NgramCounts(args.ngram_order, verbose=args.verbose)
-
-    if args.text is None:
-        ngram_counts.add_raw_counts_from_standard_input()
-    else:
-        assert os.path.isfile(args.text)
-        ngram_counts.add_raw_counts_from_file(args.text)
-
-    ngram_counts.cal_discounting_constants()
-    ngram_counts.cal_f()
-    ngram_counts.cal_bow()
-
-    if args.lm is None:
-        ngram_counts.print_as_arpa()
-    else:
-        with open(args.lm, "w", encoding=DEFAULT_ENCODING) as f:
-            ngram_counts.print_as_arpa(fout=f)
+    make_kn_lm(args.text, args.lm, args.ngram_order)
