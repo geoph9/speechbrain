@@ -8,15 +8,17 @@ from torch import nn
 from .graph_compiler import GraphCompiler
 
 
-def ctc_k2(log_probs,
-           input_lens,
-           graph_compiler,
-           texts,
-           reduction="mean",
-           beam_size=10,
-           use_double_scores=True,
-           is_training=True,
-           ):
+def ctc_k2(
+        log_probs,
+        input_lens,
+        graph_compiler,
+        texts,
+        reduction="mean",
+        beam_size=10,
+        use_double_scores=True,
+        is_training=True,
+        delay_penalty=0.,
+    ):
     input_lens = (input_lens * log_probs.shape[1]).round().int()
 
     batch_size = log_probs.shape[0]
@@ -36,6 +38,7 @@ def ctc_k2(log_probs,
         supervision_segments,
     )
     loss = k2.ctc_loss(
+        delay_penalty=delay_penalty,
         decoding_graph=decoding_graph,
         dense_fsa_vec=dense_fsa_vec,
         target_lengths=target_lens,
@@ -216,10 +219,7 @@ class LFMMILoss(nn.Module):
             # If reduction is mean then we need to divide the loss of
             # each utterance by its length.
             # loss = mmi_loss / input_lens
-            loss = -1 * tot_scores / input_lens.to(tot_scores.dtype).to(tot_scores.device)
+            loss = -1 * (tot_scores / input_lens.to(tot_scores.dtype).to(tot_scores.device)).mean()
         else:
             loss = -1 * tot_scores.sum()
-        if loss.item() > 2000:
-            print(f"==> {num_tot_scores=}", end="   ")  ## it's always the num that is -inf
-            print(f"==> {den_tot_scores=}")
         return loss
