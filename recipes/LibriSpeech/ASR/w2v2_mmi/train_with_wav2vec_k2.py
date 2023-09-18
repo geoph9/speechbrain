@@ -32,6 +32,7 @@ from pathlib import Path
 from tqdm.contrib import tqdm
 from speechbrain.dataio.dataloader import LoopedLoader
 from torch.utils.data import DataLoader
+from speechbrain.tokenizers.SentencePiece import SentencePiece
 
 from speechbrain.k2_integration.prepare_lang import prepare_lang
 from speechbrain.k2_integration.lexicon import Lexicon
@@ -115,9 +116,9 @@ class ASR(sb.Brain):
 
         is_training = (stage == sb.Stage.TRAIN)
         if stage == sb.Stage.TEST:
-            loss = None
+            loss = torch.empty(0, device=self.device)
         else:
-            loss_ctc = self.hparams.mmi_cost(
+            loss_mmi = self.hparams.mmi_cost(
                 log_probs=p_ctc, 
                 input_lens=wav_lens, 
                 graph_compiler=self.graph_compiler,
@@ -125,9 +126,9 @@ class ASR(sb.Brain):
                 is_training=is_training,
             )
 
-            loss = loss_ctc
-            if loss.item() > 1000:
-                logger.warning(f"Loss exploded to {loss.item()} on id {ids[0]}.")
+            loss = loss_mmi
+            # if loss.item() > 1000:
+            #     logger.warning(f"Loss exploded to {loss.item()} on id {ids[0]}.")
         # print(f"loss: {loss.item()}, {loss.requires_grad=}, duration: {batch.duration}")
 
 
@@ -483,21 +484,33 @@ def dataio_prepare(hparams):
 
     return train_data, valid_data, test_datasets
 
-def get_lexicon(lang_dir, 
-                csv_files, 
-                extra_vocab_files, 
-                add_word_boundary=True):
-    '''
-    Read csv_files to generate a $lang_dir/lexicon.txt for k2 training.
+def get_lexicon(
+        lang_dir, 
+        csv_files, 
+        extra_vocab_files, 
+        add_word_boundary=True,
+        unit_type="char",
+        tokenizer: SentencePiece = None,
+    ):
+    '''Read csv_files to generate a $lang_dir/lexicon.txt for k2 training.
     This usually includes the csv files of the training set and the dev set in the output_folder.
     During training, we need to make sure that the lexicon.txt contains all (or the majority of) 
     the words in the training set and the dev set.
 
     Args:
-    lang_dir: the directory to store the lexicon.txt
-    csv_files: a list of csv file paths 
-    extra_vocab_files: a list of extra vocab files, librispeech-vocab.txt is an example
-    add_word_boundary: whether to add word boundary symbols <eow> at the end of each line to the lexicon for every word
+        lang_dir: str
+            the directory to store the lexicon.txt
+        csv_files: List[str]
+            a list of csv file paths which contain a transcript at their last column.
+        extra_vocab_files: List[str]
+            a list of extra vocab files, librispeech-vocab.txt is an example
+        add_word_boundary: bool
+            whether to add word boundary symbols <eow> at the end of each line to the 
+            lexicon for every word. Only used when unit_type="char".
+        unit_type: str
+            the type of the units used in the lexicon. Can be "char" or "bpe".
+        tokenizer: spm.SentencePieceProcessor
+            the tokenizer used to tokenize the words. Only used when unit_type="bpe".
 
     Note that in each csv_file, the first line is the header, and the remaining lines are in the following format:
 
@@ -517,6 +530,14 @@ def get_lexicon(lang_dir,
     In this code, we simply use the characters in the word as the phones.
     You can use other phone sets, e.g., phonemes, BPEs, to train a better model.
     '''
+    def tokenize(word, add_word_boundary=True):
+        if unit_type == "char":
+            if add_word_boundary:
+                return list(word) + ["<eow>"]
+            return list(word)
+        elif unit_type == "bpe":
+            # assert tokenizer is not None
+            return tokenizer.sp.encode_as_pieces(word)
     # Read train.csv, dev-clean.csv to generate a lexicon.txt for k2 training
     lexicon = dict()
     for file in csv_files:
@@ -527,7 +548,7 @@ def get_lexicon(lang_dir,
             for line in f:
                 # Split the line 
                 try:
-                    _, _, _, _, trans = line.strip().split(",")
+                    trans = line.strip().split(",")[-1]
                 except ValueError as e:
                     print(line.strip().split(","))
                     raise e
@@ -535,10 +556,7 @@ def get_lexicon(lang_dir,
                 words = trans.split()
                 for word in words:
                     if word not in lexicon:
-                        if add_word_boundary:
-                            lexicon[word] = list(word) + ["<eow>"]
-                        else:
-                            lexicon[word] = list(word)
+                        lexicon[word] = tokenize(word, add_word_boundary)
 
     for file in extra_vocab_files:
         with open(file) as f:
@@ -547,10 +565,7 @@ def get_lexicon(lang_dir,
                 word = line.strip().split()[0]
                 # Split the transcription into words
                 if word not in lexicon:
-                    if add_word_boundary:
-                        lexicon[word] = list(word) + ["<eow>"]
-                    else:
-                        lexicon[word] = list(word)
+                    lexicon[word] = tokenize(word, add_word_boundary)
     # Write the lexicon to lang_dir/lexicon.txt
     os.makedirs(lang_dir, exist_ok=True)
     with open(os.path.join(lang_dir, "lexicon.txt"), "w") as f:
@@ -640,6 +655,8 @@ def create_P_fst(
         output_dir: str,
         tokens_txt: str,
         disambig_symbol: str = "#0",
+        max_order: int = 2,
+        model_name: str = "P"
     ):
     """Create the P.fst.txt for LF-MMI. The reason we don't use `arpa_to_fst`
     is because this is a token-level LM (e.g. phone/word-piece/character LM).
@@ -654,8 +671,8 @@ def create_P_fst(
         tokens_txt: The path to the tokens.txt file created by prepare_lang.
         disambig_symbol: The disambiguation symbol to use.        
     """
-    arpa_path = Path(output_dir) / "P.arpa"
-    fst_path = Path(output_dir) / "P.fst.txt"
+    arpa_path = Path(output_dir) / f"{model_name}.arpa"
+    fst_path = Path(output_dir) / f"{model_name}.fst.txt"
     if fst_path.exists():
         return
     if not arpa_path.exists():
@@ -663,15 +680,17 @@ def create_P_fst(
         with open(csv_path) as f:
             texts = [line.strip().split(",")[-1] for line in f.readlines()[1:]]
         tokenized_transcripts = list(lexicon.generate_transcript_chars(texts))
-        with open(Path(tokens_txt).parent / "tokenized_transcripts.txt", "w") as f:
+        tok_transcripts_path = Path(tokens_txt).parent / "tokenized_transcripts.txt"
+        with open(tok_transcripts_path, "w") as f:
+            logger.info(f"Writing {tok_transcripts_path}")
             f.write("\n".join(tokenized_transcripts))
         # Generate kneser-ney language model as arpa format. By default,
         # it will read the corpus from standard input, and output to 
         # standard output. Adapted from icefall's librispeech recipe.
         make_kn_lm(
-            text=tokenized_transcripts,
+            text=tok_transcripts_path,
             lm=arpa_path,
-            ngram_order=2,
+            ngram_order=max_order,
         )
     logger.info(f"Creating {fst_path}")
     try:
@@ -680,7 +699,7 @@ def create_P_fst(
             input_arpa=str(arpa_path),
             disambig_symbol=disambig_symbol,
             read_symbol_table=str(tokens_txt),
-            max_order=2,
+            max_order=max_order,
             bos_symbol="<s>",
             eos_symbol="</s>",
         )
@@ -728,6 +747,22 @@ if __name__ == "__main__":
         },
     )
 
+    tokenizer = None
+    if hparams.get("token_type", "char") == "bpe":
+        tokenizer = SentencePiece(
+            model_dir=os.path.join(hparams["output_folder"], "spm"),
+            vocab_size=hparams["output_neurons"],
+            annotation_train=hparams["train_csv"],
+            annotation_read="wrd",
+            model_type=hparams["token_type"],  # must be bpe
+            character_coverage=1.0,
+            bos_id=-1,
+            eos_id=-1,
+            pad_id=-1,
+            unk_id=0,
+            annotation_format="csv",
+        )
+
     # here we create the datasets objects as well as tokenization and encoding
     train_data, valid_data, test_datasets = dataio_prepare(hparams)
 
@@ -739,6 +774,8 @@ if __name__ == "__main__":
             "csv_files": [hparams["output_folder"] + "/train.csv"],
             "extra_vocab_files": [hparams["vocab_file"]],
             "add_word_boundary": hparams["add_word_boundary"],
+            "tokenizer": tokenizer,
+            "unit_type": hparams["token_type"],
         },
     )
 
@@ -796,6 +833,7 @@ if __name__ == "__main__":
     if need_G:
         assert G_path.is_file(), f"{G_path} does not exist"
 
+    P_model_name = hparams.get("P_model_name", "P")
     run_on_main(
         create_P_fst,
         kwargs={
@@ -804,6 +842,8 @@ if __name__ == "__main__":
             "output_dir": asr_brain.hparams.lm_dir,
             "tokens_txt": Path(asr_brain.hparams.lang_dir) / "tokens.txt",
             "disambig_symbol": "#0",
+            "max_order": hparams.get("unit_level_max_order", 2),
+            "model_name": P_model_name,
         },
     )
     
@@ -811,7 +851,7 @@ if __name__ == "__main__":
         lexicon=lexicon,
         device=asr_brain.device,
         G_path=G_path,
-        P_path=Path(asr_brain.hparams.lm_dir) / "P.fst.txt",
+        P_path=Path(asr_brain.hparams.lm_dir) / f"{P_model_name}.fst.txt",
         rescoring_lm_path=rescoring_lm_path,
         decoding_method=asr_brain.hparams.decoding_method,
     )
