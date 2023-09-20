@@ -125,6 +125,14 @@ def mmi_k2(
         reduction="mean",
     ):
     input_lens = (input_lens * log_probs.shape[1]).round().int()
+    
+    indices = torch.argsort(input_lens, descending=True)
+    input_lens = input_lens[indices]
+    log_probs = log_probs[indices]
+    texts = [texts[i] for i in indices]
+
+    if not all(input_lens[i] >= input_lens[i+1] for i in range(len(input_lens) - 1)):
+        raise ValueError(f"input_lens must be sorted in decreasing order but got {input_lens}")
 
     batch_size = log_probs.shape[0]
 
