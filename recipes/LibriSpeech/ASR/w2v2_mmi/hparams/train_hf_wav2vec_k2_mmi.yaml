@@ -21,7 +21,7 @@ wav2vec2_folder: !ref <save_folder>/wav2vec2_checkpoint
 data_folder: !PLACEHOLDER # e,g./path/to/LibriSpeech
 # noise/ris dataset will automatically be downloaded
 # data_folder_rirs: !ref <data_folder>
-train_splits: ["train-clean-100"] #, "train-clean-360", "train-other-500"]
+train_splits: ["train-clean-100", "train-clean-360", "train-other-500"]
 dev_splits: ["dev-clean", "dev-other"]
 test_splits: ["test-clean", "test-other"]
 skip_prep: False
@@ -30,9 +30,9 @@ train_csv: !ref <output_folder>/train.csv
 valid_csv: !ref <output_folder>/dev-clean.csv
 test_csv:
    - !ref <output_folder>/test-clean.csv
-   # - !ref <output_folder>/test-other.csv
-   # - !ref <output_folder>/dev-clean.csv
-   # - !ref <output_folder>/dev-other.csv
+   - !ref <output_folder>/test-other.csv
+   - !ref <output_folder>/dev-clean.csv
+   - !ref <output_folder>/dev-other.csv
 
 # Training parameters
 number_of_epochs: 1
@@ -188,8 +188,12 @@ decoding_method: whole-lattice-rescoring
 # will first create a 2-gram character-levelP.arpa (see
 # make_kn_lm.py) and then convert it to P.fst.txt using kaldilm.
 lm_dir: lm
+unit_level_max_order: 4
+P_model_name: P_four
 lm_scale_list: [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4]
 # upsample whenever the input the time dimension of the w2v2
 # features is smaller than the number of characters in the
 # transcription
 upsampling: True
+
+token_type: char

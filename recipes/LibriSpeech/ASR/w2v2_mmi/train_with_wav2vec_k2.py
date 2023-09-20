@@ -1,9 +1,8 @@
 #!/usr/bin/env/python3
-"""Recipe for training a conformer model with wav2vec2 encoder on LibriSpeech.
-The system employs an encoder-decoder architecture, where the encoder is a
-pre-trained wav2vec2 model and the decoder is a conformer model.
-The loss function is LF-MMI. For more details, please refer to the original
-paper: https://arxiv.org/pdf/2005.08100.pdf
+"""Recipe for training a model with wav2vec2 encoder and the LF-MMI loss
+function on LibriSpeech. For more details regarding the loss function, please
+refer to the original paper: https://arxiv.org/pdf/2005.08100.pdf
+
 To run this recipe, do the following:
 > python train_with_wav2vec_k2.py hparams/hparams/train_hf_wav2vec_k2_mmi.yaml --data_folder=/path
 
