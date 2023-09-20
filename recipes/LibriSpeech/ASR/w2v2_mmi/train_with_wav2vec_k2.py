@@ -36,7 +36,7 @@ from speechbrain.tokenizers.SentencePiece import SentencePiece
 from speechbrain.k2_integration.prepare_lang import prepare_lang
 from speechbrain.k2_integration.lexicon import Lexicon
 from speechbrain.k2_integration.make_kn_lm import make_kn_lm
-from mmi_graph_compiler import MmiTrainingGraphCompiler
+from speechbrain.k2_integration.graph_compiler import MmiTrainingGraphCompiler
 
 logger = logging.getLogger(__name__)
 
@@ -85,15 +85,15 @@ class ASR(sb.Brain):
                 logits = logits.view(
                     logits.shape[0], -1, self.hparams.output_neurons
                 )
-                logger.info(f"Upsampling from {old_shape} to {logits.shape}")
+                logger.debug(f"Upsampling from {old_shape} to {logits.shape}")
 
-        p_ctc = self.hparams.log_softmax(logits)
-        return p_ctc, wav_lens
+        log_probs = self.hparams.log_softmax(logits)
+        return log_probs, wav_lens
 
     def compute_objectives(self, predictions, batch, stage):
         """Computes the loss (CTC+NLL) given predictions and targets."""
 
-        p_ctc, wav_lens = predictions
+        log_probs, wav_lens = predictions
 
         ids = batch.id
         # tokens, tokens_lens = batch.tokens
@@ -105,7 +105,7 @@ class ASR(sb.Brain):
             
         # Sort batch to be descending by length of wav files, which is demanded by k2
         if self.hparams.sorting == "ascending":
-            p_ctc = torch.flip(p_ctc, (0,))
+            log_probs = torch.flip(log_probs, (0,))
             wav_lens = torch.flip(wav_lens, (0,))
             texts = [batch.wrd[i] for i in reversed(range(len(batch.wrd)))]
         elif self.hparams.sorting == "descending":
@@ -118,7 +118,7 @@ class ASR(sb.Brain):
             loss = torch.empty(0, device=self.device)
         else:
             loss_mmi = self.hparams.mmi_cost(
-                log_probs=p_ctc, 
+                log_probs=log_probs, 
                 input_lens=wav_lens, 
                 graph_compiler=self.graph_compiler,
                 texts=texts,
@@ -126,15 +126,11 @@ class ASR(sb.Brain):
             )
 
             loss = loss_mmi
-            # if loss.item() > 1000:
-            #     logger.warning(f"Loss exploded to {loss.item()} on id {ids[0]}.")
-        # print(f"loss: {loss.item()}, {loss.requires_grad=}, duration: {batch.duration}")
-
 
         if stage == sb.Stage.VALID:
             # Decode token terms to words
             predicted_texts = self.graph_compiler.decode(
-                p_ctc,
+                log_probs,
                 wav_lens,
                 ac_scale=self.hparams.ac_scale,
                 stage=stage,
@@ -153,7 +149,7 @@ class ASR(sb.Brain):
                 # saved in a single file, otherwise, a new directory will be created
                 # for each lm_scale used in whole lattice rescoring.
                 decode_output: Union[dict, List[str]] = self.graph_compiler.decode(
-                    p_ctc,
+                    log_probs,
                     wav_lens,
                     search_beam=self.hparams.test_search_beam,
                     output_beam=self.hparams.test_output_beam,
@@ -703,7 +699,7 @@ def create_P_fst(
             eos_symbol="</s>",
         )
     except Exception as e:
-        logger.info(f"Failed to create 2-gram FST from input={arpa_path}, disambig_symbol={disambig_symbol}, read_symbol_table={words_txt}")
+        logger.info(f"Failed to create 2-gram FST from input={arpa_path}, disambig_symbol={disambig_symbol}, read_symbol_table={tokens_txt}")
         raise e
     logger.info(f"Writing {fst_path}")
     with open(fst_path, "w") as f:

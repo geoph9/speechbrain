@@ -16,7 +16,7 @@ import os
 import logging
 from pathlib import Path
 from abc import ABC, abstractmethod
-from typing import Dict, List, Union, Optional, Tuple
+from typing import Dict, List, Union, Optional, Tuple, Iterable
 
 import k2
 import torch
@@ -495,3 +495,181 @@ class CtcTrainingGraphCompiler(GraphCompiler):
             torch.cuda.empty_cache()
 
             return out
+
+class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
+    def __init__(
+        self,
+        lexicon: Lexicon,
+        device: torch.device,
+        oov: str = "<UNK>",
+        need_repeat_flag: bool = False,
+        G_path: str = None,
+        P_path: str = None,
+        rescoring_lm_path: Union[Path, str] = None,
+        sos_id: int = 1,
+        eos_id: int = 1,
+        decoding_method: str = "1best",
+    ):
+        """
+        Args:
+          lexicon:
+            It is built from `data/lang/lexicon.txt`.
+          device:
+            The device to use for operations compiling transcripts to FSAs.
+          oov:
+            Out of vocabulary word. When a word in the transcript
+            does not exist in the lexicon, it is replaced with `oov`.
+          need_repeat_flag: bool
+            If True, will add an attribute named `_is_repeat_token_` to ctc_topo
+            indicating whether this token is a repeat token in ctc graph.
+            This attribute is needed to implement delay-penalty for phone-based
+            ctc loss. See https://github.com/k2-fsa/k2/pull/1086 for more
+            details. Note: The above change MUST be included in k2 to open this
+            flag.
+          G_path: str
+            Path to the language model FST to be used in the decoding-graph creation.
+            If None, then we assume that the language model is not used.
+          P_path: str,
+            Path to the language model FST to be used in the numerator graph creation.
+            If None, then we assume that the language model is not used.
+          rescoring_lm_path: Path | str
+            Path to the language model FST to be used in the rescoring of the decoding
+            graph. If None, then we assume that the language model is not used.
+          sos_id: int
+            ID of the start-of-sentence token.
+          eos_id: int
+            ID of the end-of-sentence token.
+          decoding_method: str
+            One of 1best, whole-lattice-rescoring, or nbest.
+        """
+        super().__init__(
+            lexicon=lexicon,
+            device=device,
+            oov=oov,
+            need_repeat_flag=need_repeat_flag,
+            G_path=G_path,
+            rescoring_lm_path=rescoring_lm_path,
+            decoding_method=decoding_method,
+        )
+        self.sos_id = sos_id
+        self.eos_id = eos_id
+        self.P_path = P_path
+        self._p = None
+
+        self.build_ctc_topo_P()
+
+    @property
+    def P(self) -> k2.Fsa:
+        if self._p is not None:
+            return self._p
+        with open(self.P_path) as f:
+            # P is not an acceptor because there is
+            # a back-off state, whose incoming arcs
+            # have label #0 and aux_label 0 (i.e., <eps>).
+            self._p = k2.Fsa.from_openfst(f.read(), acceptor=False)
+        return self._p
+
+    def build_ctc_topo_P(self):
+        """Built ctc_topo_P, the composition result of
+        ctc_topo and P, where P is a pre-trained bigram
+        word piece LM.
+        """
+        # Note: there is no need to save a pre-compiled P and ctc_topo
+        # as it is very fast to generate them.
+        logger.info(f"Loading P from lexicon ({self.P_path})")
+        P = self.P
+        
+        first_token_disambig_id = self.lexicon.token_table["#0"]
+
+        # P.aux_labels is not needed in later computations, so
+        # remove it here.
+        del P.aux_labels
+        # CAUTION: The following line is crucial.
+        # Arcs entering the back-off state have label equal to #0.
+        # We have to change it to 0 here.
+        labels = P.labels.clone()
+        labels[labels >= first_token_disambig_id] = 0
+        P.labels = labels
+
+        P = k2.remove_epsilon(P)
+        P = k2.arc_sort(P)
+        P = P.to(self.device)
+        # Add epsilon self-loops to P because we want the
+        # following operation "k2.intersect" to run on GPU.
+        P_with_self_loops = k2.add_epsilon_self_loops(P)
+
+        max_token_id = max(self.lexicon.tokens)
+        logger.info(
+            f"Building ctc_topo (modified=False). max_token_id: {max_token_id}"
+        )
+
+        ctc_topo_inv = k2.arc_sort(self.ctc_topo.invert_())
+
+        logger.info("Building ctc_topo_P")
+        ctc_topo_P = k2.intersect(
+            ctc_topo_inv, P_with_self_loops, treat_epsilons_specially=False
+        ).invert()
+
+        self.ctc_topo_P = k2.arc_sort(ctc_topo_P)
+        logger.info(f"ctc_topo_P num_arcs: {self.ctc_topo_P.num_arcs}")
+
+    def compile(
+        self, texts: Iterable[str], replicate_den: bool = True
+    ) -> Tuple[k2.Fsa, k2.Fsa]:
+        """Create numerator and denominator graphs from transcripts
+        and the bigram phone LM.
+
+        Args:
+          texts:
+            A list of transcripts. Within a transcript, words are
+            separated by spaces. An example `texts` is given below::
+
+                ["Hello icefall", "LF-MMI training with icefall using k2"]
+
+          replicate_den:
+            If True, the returned den_graph is replicated to match the number
+            of FSAs in the returned num_graph; if False, the returned den_graph
+            contains only a single FSA
+        Returns:
+          A tuple (num_graph, den_graph), where
+
+            - `num_graph` is the numerator graph. It is an FsaVec with
+              shape `(len(texts), None, None)`.
+
+            - `den_graph` is the denominator graph. It is an FsaVec
+              with the same shape of the `num_graph` if replicate_den is
+              True; otherwise, it is an FsaVec containing only a single FSA.
+        """
+        transcript_fsa = self.convert_transcript_to_fsa(texts)
+
+        # remove word IDs from transcript_fsa since it is not needed
+        del transcript_fsa.aux_labels
+        # NOTE: You can comment out the above statement
+        # if you want to run test/test_mmi_graph_compiler.py
+
+        transcript_fsa_with_self_loops = k2.remove_epsilon_and_add_self_loops(
+            transcript_fsa
+        )
+
+        transcript_fsa_with_self_loops = k2.arc_sort(transcript_fsa_with_self_loops)
+
+        num = k2.compose(
+            self.ctc_topo_P,
+            transcript_fsa_with_self_loops,
+            treat_epsilons_specially=False,
+        )
+
+        # CAUTION: Due to the presence of P,
+        # the resulting `num` may not be connected
+        num = k2.connect(num)
+
+        num = k2.arc_sort(num)
+
+        ctc_topo_P_vec = k2.create_fsa_vec([self.ctc_topo_P])
+        if replicate_den:
+            indexes = torch.zeros(len(texts), dtype=torch.int32, device=self.device)
+            den = k2.index_fsa(ctc_topo_P_vec, indexes)
+        else:
+            den = ctc_topo_P_vec
+
+        return num, den
