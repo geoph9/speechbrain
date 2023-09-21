@@ -114,7 +114,7 @@ log_softmax: !new:speechbrain.nnet.activations.Softmax
    apply_log: True
 
 mmi_cost: !name:speechbrain.k2_integration.losses.mmi_k2
-   beam_size: 10
+   beam_size: 8
    den_scale: 1.0
    subsampling_factor: !ref <subsample_factor>
    reduction: mean
@@ -179,7 +179,7 @@ test_max_active_state: 3000
 ac_scale: 1.5
 use_HLG: False
 # 1best or whole-lattice-rescoring
-decoding_method: whole-lattice-rescoring
+decoding_method: 1best
 # This is where the 3gram and (optionally) 4gram LM are stored
 # They can be in either ARPA or FST format. If the former, then 
 # the FST equivalent will be created in the same directory by

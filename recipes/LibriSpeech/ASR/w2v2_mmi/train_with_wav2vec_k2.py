@@ -126,6 +126,12 @@ class ASR(sb.Brain):
             )
 
             loss = loss_mmi
+        
+        if loss > 2000:
+            logger.info(
+                f"Loss exploded to {loss} (loss_mmi={loss_mmi})."
+                f"  => on {ids=}"
+            )
 
         if stage == sb.Stage.VALID:
             # Decode token terms to words
@@ -501,7 +507,7 @@ def get_lexicon(
             a list of extra vocab files, librispeech-vocab.txt is an example
         add_word_boundary: bool
             whether to add word boundary symbols <eow> at the end of each line to the 
-            lexicon for every word. Only used when unit_type="char".
+            lexicon for every word.
         unit_type: str
             the type of the units used in the lexicon. Can be "char" or "bpe".
         tokenizer: spm.SentencePieceProcessor
@@ -527,12 +533,13 @@ def get_lexicon(
     '''
     def tokenize(word, add_word_boundary=True):
         if unit_type == "char":
-            if add_word_boundary:
-                return list(word) + ["<eow>"]
-            return list(word)
+            tokenized = list(word)
         elif unit_type == "bpe":
             # assert tokenizer is not None
-            return tokenizer.sp.encode_as_pieces(word)
+            tokenized = tokenizer.sp.encode_as_pieces(word)
+        if add_word_boundary:
+            return tokenized + ["<eow>"]
+        return tokenized
     # Read train.csv, dev-clean.csv to generate a lexicon.txt for k2 training
     lexicon = dict()
     for file in csv_files:
@@ -744,17 +751,21 @@ if __name__ == "__main__":
 
     tokenizer = None
     if hparams.get("token_type", "char") == "bpe":
+        user_defined_symbols = ["<blk>", "<sos/eos>"]
+        if hparams["add_word_boundary"]:
+            user_defined_symbols += ["<eow>"]
+        unk_id = len(user_defined_symbols)
         tokenizer = SentencePiece(
             model_dir=os.path.join(hparams["output_folder"], "spm"),
             vocab_size=hparams["output_neurons"],
             annotation_train=hparams["train_csv"],
             annotation_read="wrd",
+            user_defined_symbols=",".join(user_defined_symbols),
             model_type=hparams["token_type"],  # must be bpe
             character_coverage=1.0,
             bos_id=-1,
             eos_id=-1,
-            pad_id=-1,
-            unk_id=0,
+            unk_id=unk_id,
             annotation_format="csv",
         )
 

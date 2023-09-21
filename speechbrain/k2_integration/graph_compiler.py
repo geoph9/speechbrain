@@ -166,17 +166,33 @@ class GraphCompiler(ABC):
                     word_ids.append(self.oov_id)
             word_ids_list.append(word_ids)
 
-        word_fsa = k2.linear_fsa(word_ids_list, self.device)
+        fsa = k2.linear_fsa(word_ids_list, self.device)
+        fsa = k2.add_epsilon_self_loops(fsa)
 
-        word_fsa_with_self_loops = k2.add_epsilon_self_loops(word_fsa)
+        # The reason to use `invert_()` at the end is as follows:
+        #
+        # (1) The `labels` of L_inv is word IDs and `aux_labels` is token IDs
+        # (2) `fsa.labels` is word IDs
+        # (3) after intersection, the `labels` is still word IDs
+        # (4) after `invert_()`, the `labels` is token IDs
+        #     and `aux_labels` is word IDs
+        transcript_fsa = k2.intersect(
+            self.L_inv, fsa, treat_epsilons_specially=False
+        ).invert_()
+        transcript_fsa = k2.arc_sort(transcript_fsa)
+        return transcript_fsa
 
-        fsa = k2.intersect(
-            self.L_inv, word_fsa_with_self_loops, treat_epsilons_specially=False
-        )
-        # fsa has word ID as labels and token ID as aux_labels, so
-        # we need to invert it
-        ans_fsa = fsa.invert_()
-        return k2.arc_sort(ans_fsa)
+        # word_fsa = k2.linear_fsa(word_ids_list, self.device)
+
+        # word_fsa_with_self_loops = k2.add_epsilon_self_loops(word_fsa)
+
+        # fsa = k2.intersect(
+        #     self.L_inv, word_fsa_with_self_loops, treat_epsilons_specially=False
+        # )
+        # # fsa has word ID as labels and token ID as aux_labels, so
+        # # we need to invert it
+        # ans_fsa = fsa.invert_()
+        # return k2.arc_sort(ans_fsa)
     
     @abstractmethod
     def compile(
@@ -359,28 +375,28 @@ class CtcTrainingGraphCompiler(GraphCompiler):
 
         return decoding_graph
 
-    def texts_to_ids(self, texts: List[str]) -> List[List[int]]:
-        """Convert a list of texts to a list-of-list of word IDs.
+    # def texts_to_ids(self, texts: List[str]) -> List[List[int]]:
+    #     """Convert a list of texts to a list-of-list of word IDs.
 
-        Args:
-          texts:
-            It is a list of strings. Each string consists of space(s)
-            separated words. An example containing two strings is given below:
+    #     Args:
+    #       texts:
+    #         It is a list of strings. Each string consists of space(s)
+    #         separated words. An example containing two strings is given below:
 
-                ['HELLO ICEFALL', 'HELLO k2']
-        Returns:
-          Return a list-of-list of word IDs.
-        """
-        word_ids_list = []
-        for text in texts:
-            word_ids = []
-            for word in text.split():
-                if word in self.word_table:
-                    word_ids.append(self.word_table[word])
-                else:
-                    word_ids.append(self.oov_id)
-            word_ids_list.append(word_ids)
-        return word_ids_list
+    #             ['HELLO ICEFALL', 'HELLO k2']
+    #     Returns:
+    #       Return a list-of-list of word IDs.
+    #     """
+    #     word_ids_list = []
+    #     for text in texts:
+    #         word_ids = []
+    #         for word in text.split():
+    #             if word in self.word_table:
+    #                 word_ids.append(self.word_table[word])
+    #             else:
+    #                 word_ids.append(self.oov_id)
+    #         word_ids_list.append(word_ids)
+    #     return word_ids_list
 
     def decode(self,
                log_probs: torch.Tensor,
@@ -576,7 +592,6 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
         """
         # Note: there is no need to save a pre-compiled P and ctc_topo
         # as it is very fast to generate them.
-        logger.info(f"Loading P from lexicon ({self.P_path})")
         P = self.P
         
         first_token_disambig_id = self.lexicon.token_table["#0"]
