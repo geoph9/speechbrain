@@ -281,7 +281,7 @@ class Lexicon(object):
             results.append(tids)
         return results
     
-    def generate_transcript_chars(self, texts: List[str]) -> Generator[str, None, None]:
+    def generate_tokenized_transcripts(self, texts: List[str]) -> Generator[str, None, None]:
         """Generate a tokenized version of each transcript (one line for each
         utterance). The output is written as a list of strings.
 

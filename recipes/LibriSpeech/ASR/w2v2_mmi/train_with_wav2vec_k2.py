@@ -21,19 +21,23 @@ Authors
 
 import os
 import sys
-from typing import List, Union
 import torch
 import logging
+import shutil
+from pathlib import Path
+from typing import List, Union
+
 import speechbrain as sb
+import sentencepiece as spm
 from speechbrain.utils.distributed import run_on_main, if_main_process
 from hyperpyyaml import load_hyperpyyaml
-from pathlib import Path
 from tqdm.contrib import tqdm
 from speechbrain.dataio.dataloader import LoopedLoader
 from torch.utils.data import DataLoader
 from speechbrain.tokenizers.SentencePiece import SentencePiece
 
 from speechbrain.k2_integration.prepare_lang import prepare_lang
+from speechbrain.k2_integration.prepare_lang_bpe import prepare_lang as prepare_lang_bpe
 from speechbrain.k2_integration.lexicon import Lexicon
 from speechbrain.k2_integration.make_kn_lm import make_kn_lm
 from speechbrain.k2_integration.graph_compiler import MmiTrainingGraphCompiler
@@ -127,11 +131,11 @@ class ASR(sb.Brain):
 
             loss = loss_mmi
         
-        if loss > 2000:
-            logger.info(
-                f"Loss exploded to {loss} (loss_mmi={loss_mmi})."
-                f"  => on {ids=}"
-            )
+        # if loss > 2000:
+        #     logger.info(
+        #         f"Loss exploded to {loss} (loss_mmi={loss_mmi})."
+        #         f"  => on {ids=}"
+        #     )
 
         if stage == sb.Stage.VALID:
             # Decode token terms to words
@@ -491,7 +495,7 @@ def get_lexicon(
         extra_vocab_files, 
         add_word_boundary=True,
         unit_type="char",
-        tokenizer: SentencePiece = None,
+        tokenizer: spm.SentencePieceProcessor = None,
     ):
     '''Read csv_files to generate a $lang_dir/lexicon.txt for k2 training.
     This usually includes the csv files of the training set and the dev set in the output_folder.
@@ -536,7 +540,7 @@ def get_lexicon(
             tokenized = list(word)
         elif unit_type == "bpe":
             # assert tokenizer is not None
-            tokenized = tokenizer.sp.encode_as_pieces(word)
+            tokenized = tokenizer.encode_as_pieces(word)
         if add_word_boundary:
             return tokenized + ["<eow>"]
         return tokenized
@@ -662,8 +666,6 @@ def create_P_fst(
     ):
     """Create the P.fst.txt for LF-MMI. The reason we don't use `arpa_to_fst`
     is because this is a token-level LM (e.g. phone/word-piece/character LM).
-    TODO: This could still be merged in `arpa_to_fst` by adding an extra
-          `read_symbol_table` argument.
 
     Args:
         lexicon: The lexicon object used to get the tokenized version of 
@@ -681,7 +683,7 @@ def create_P_fst(
         logger.info(f"Creating {arpa_path}")
         with open(csv_path) as f:
             texts = [line.strip().split(",")[-1] for line in f.readlines()[1:]]
-        tokenized_transcripts = list(lexicon.generate_transcript_chars(texts))
+        tokenized_transcripts = list(lexicon.generate_tokenized_transcripts(texts))
         tok_transcripts_path = Path(tokens_txt).parent / "tokenized_transcripts.txt"
         with open(tok_transcripts_path, "w") as f:
             logger.info(f"Writing {tok_transcripts_path}")
@@ -712,6 +714,54 @@ def create_P_fst(
     with open(fst_path, "w") as f:
         f.write(s)
 
+def get_bpe_tokenizer(hparams) -> spm.SentencePieceProcessor:
+    """Get the BPE tokenizer. If the BPE model does not exist, then we will
+    train it using SentencePiece.
+
+    Args:
+        hparams: The hyperparameters from a yaml file (e.g. hparams/train_hf_wav2vec_k2_mmi_bpe.yaml)
+
+    Returns:
+        The SentencePiece tokenizer.
+    """
+    n_tokens = hparams["output_neurons"]
+    model_prefix = Path(hparams["lang_dir"]) / f"bpe_{n_tokens}"
+    model_file = model_prefix.with_suffix(".model")
+    if not model_file.is_file():
+        with open(hparams["train_csv"]) as f:
+            texts = [line.strip().split(",")[-1] for line in f.readlines()[1:]]
+        transcripts_path = model_file.parent / "train_transcripts.txt"
+        with open(transcripts_path, "w") as f:
+            f.write("\n".join(texts))
+        user_defined_symbols = ["<blk>", "<sos/eos>"]
+        # if hparams["add_word_boundary"]:
+        #     user_defined_symbols += ["<eow>"]
+        unk_id = len(user_defined_symbols)
+        logger.info(f"Saving a BPE model into {model_file}")
+        spm.SentencePieceTrainer.train(
+            input=str(transcripts_path),
+            vocab_size=n_tokens,
+            model_type="bpe",
+            model_prefix=f"bpe_{n_tokens}",
+            input_sentence_size=100000000,
+            character_coverage=1.0,
+            user_defined_symbols=user_defined_symbols,
+            unk_id=unk_id,
+            bos_id=-1,
+            eos_id=-1,
+        )
+        shutil.move(
+            f"bpe_{n_tokens}.model",
+            str(model_file),
+        )
+        shutil.move(
+            f"bpe_{n_tokens}.vocab",
+            str(model_prefix.with_suffix(".vocab")),
+        )
+    tokenizer = spm.SentencePieceProcessor()
+    tokenizer.load(str(model_file))
+    return tokenizer
+
 if __name__ == "__main__":
 
     # CLI:
@@ -730,6 +780,7 @@ if __name__ == "__main__":
         hyperparams_to_save=hparams_file,
         overrides=overrides,
     )
+    os.makedirs(hparams["lang_dir"], exist_ok=True)
 
     # Dataset prep (parsing Librispeech)
     from librispeech_prepare import prepare_librispeech  # noqa
@@ -750,23 +801,33 @@ if __name__ == "__main__":
     )
 
     tokenizer = None
-    if hparams.get("token_type", "char") == "bpe":
-        user_defined_symbols = ["<blk>", "<sos/eos>"]
-        if hparams["add_word_boundary"]:
-            user_defined_symbols += ["<eow>"]
-        unk_id = len(user_defined_symbols)
-        tokenizer = SentencePiece(
-            model_dir=os.path.join(hparams["output_folder"], "spm"),
-            vocab_size=hparams["output_neurons"],
-            annotation_train=hparams["train_csv"],
-            annotation_read="wrd",
-            user_defined_symbols=",".join(user_defined_symbols),
-            model_type=hparams["token_type"],  # must be bpe
-            character_coverage=1.0,
-            bos_id=-1,
-            eos_id=-1,
-            unk_id=unk_id,
-            annotation_format="csv",
+    if hparams["token_type"] == "bpe":
+        tokenizer = get_bpe_tokenizer(hparams)
+        # user_defined_symbols = ["<blk>", "<sos/eos>"]
+        # if hparams["add_word_boundary"]:
+        #     user_defined_symbols += ["<eow>"]
+        # unk_id = len(user_defined_symbols)
+        # tokenizer = SentencePiece(
+        #     model_dir=os.path.join(hparams["output_folder"], "spm"),
+        #     vocab_size=hparams["output_neurons"],
+        #     annotation_train=hparams["train_csv"],
+        #     annotation_read="wrd",
+        #     user_defined_symbols=",".join(user_defined_symbols),
+        #     model_type=hparams["token_type"],  # must be bpe
+        #     character_coverage=1.0,
+        #     bos_id=-1,
+        #     eos_id=-1,
+        #     unk_id=unk_id,
+        #     annotation_format="csv",
+        #     add_dummy_prefix=False,
+        # )
+        # Create the lang directory for k2 training
+        run_on_main(
+            prepare_lang_bpe,
+            kwargs={
+                "lang_dir": hparams["lang_dir"],
+                "tokenizer": tokenizer,
+            },
         )
 
     # here we create the datasets objects as well as tokenization and encoding
@@ -785,14 +846,15 @@ if __name__ == "__main__":
         },
     )
 
-    # Create the lang directory for k2 training
-    run_on_main(
-        prepare_lang,
-        kwargs={
-            "lang_dir": hparams["lang_dir"],
-            "sil_prob": hparams["sil_prob"],
-        },
-    )
+    if hparams["token_type"] == "char":
+        # Create the lang directory for k2 training
+        run_on_main(
+            prepare_lang,
+            kwargs={
+                "lang_dir": hparams["lang_dir"],
+                "sil_prob": hparams["sil_prob"],
+            },
+        )
 
 
     lexicon = Lexicon(hparams["lang_dir"])

@@ -114,7 +114,7 @@ log_softmax: !new:speechbrain.nnet.activations.Softmax
    apply_log: True
 
 mmi_cost: !name:speechbrain.k2_integration.losses.mmi_k2
-   beam_size: 8
+   beam_size: 6
    den_scale: 1.0
    subsampling_factor: !ref <subsample_factor>
    reduction: mean
@@ -168,7 +168,7 @@ cer_computer: !name:speechbrain.utils.metric_stats.ErrorRateStats
 lang_dir: !ref <output_folder>/lang
 vocab_file: !ref <data_folder>/librispeech-vocab.txt
 sil_prob: 0.
-add_word_boundary: True
+add_word_boundary: False
 subsample_factor: 1
 # For k2 decoding
 test_search_beam: 32
@@ -189,7 +189,7 @@ decoding_method: 1best
 # make_kn_lm.py) and then convert it to P.fst.txt using kaldilm.
 lm_dir: lm
 unit_level_max_order: 2
-P_model_name: P_bpe
+P_model_name: !ref P_<unit_level_max_order>gram_bpe<output_neurons>
 lm_scale_list: [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4]
 # upsample whenever the input the time dimension of the w2v2
 # features is smaller than the number of characters in the
