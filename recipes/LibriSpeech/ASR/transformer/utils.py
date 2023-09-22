@@ -207,7 +207,7 @@ def create_P_fst(
         logger.info(f"Creating {arpa_path}")
         with open(csv_path) as f:
             texts = [line.strip().split(",")[-1] for line in f.readlines()[1:]]
-        tokenized_transcripts = list(lexicon.generate_transcript_chars(texts))
+        tokenized_transcripts = list(lexicon.generate_tokenized_transcripts(texts))
         tok_transcripts_path = Path(tokens_txt).parent / "tokenized_transcripts.txt"
         with open(tok_transcripts_path, "w") as f:
             logger.info(f"Writing {tok_transcripts_path}")
