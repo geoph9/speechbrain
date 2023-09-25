@@ -139,19 +139,16 @@ class ASR(sb.Brain):
 
         if stage == sb.Stage.VALID:
             # Decode token terms to words
-            # predicted_texts = self.graph_compiler.decode(
-            #     log_probs,
-            #     wav_lens,
-            #     ac_scale=self.hparams.ac_scale,
-            #     stage=stage,
-            # ) # list of strings
-            # predicted_words = [wrd.split(" ") for wrd in predicted_texts]
-            # target_words = [wrd.split(" ") for wrd in texts]
-            # self.wer_metric.append(ids, predicted_words, target_words)
-            # self.cer_metric.append(ids, predicted_words, target_words)
+            predicted_texts = self.graph_compiler.decode(
+                log_probs,
+                wav_lens,
+                ac_scale=self.hparams.ac_scale,
+                stage=stage,
+            ) # list of strings
+            predicted_words = [wrd.split(" ") for wrd in predicted_texts]
             target_words = [wrd.split(" ") for wrd in texts]
-            self.wer_metric.append(ids, target_words, target_words)
-            self.cer_metric.append(ids, target_words, target_words)
+            self.wer_metric.append(ids, predicted_words, target_words)
+            self.cer_metric.append(ids, predicted_words, target_words)
         if stage == sb.Stage.TEST:  # Language model decoding only used for test
             if self.hparams.use_language_modelling:
                 raise NotImplementedError(
