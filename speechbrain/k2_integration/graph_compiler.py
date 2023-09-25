@@ -80,7 +80,12 @@ class GraphCompiler(ABC):
         self.rescoring_graph: k2.Fsa = None  # G (usually 4-gram LM)
         self.decoding_method: bool = decoding_method
 
-    def get_G(self, path: str = None, save: bool = True) -> k2.Fsa:
+    def get_G(
+            self,
+            path: str = None,
+            save: bool = True,
+            device: Optional[torch.device] = None
+        ) -> k2.Fsa:
         """Load a LM to be used in the decoding graph creation (or LM rescoring).
         Note that it doesn't load G into memory.
 
@@ -93,20 +98,21 @@ class GraphCompiler(ABC):
             An FSA representing the LM. The device is the same as graph_compiler.device.
         """
         path = str(path or self.G_path)
+        device = device or self.device
         if os.path.exists(path.replace(".fst.txt", ".pt")):
-            logger.info(f"NOTE: Loading G from its .pt format")
+            logger.info(f"NOTE: Loading {path} from its .pt format")
             path = path.replace(".fst.txt", ".pt")
         # If G_path is an fst.txt file then convert to .pt file
         if path.endswith(".fst.txt"):
             if not os.path.isfile(path):
                 raise FileNotFoundError(f"File {path} not found. You need to run the kaldilm to get it.")
             with open(path) as f:
-                G = k2.Fsa.from_openfst(f.read(), acceptor=False).to(self.device)
+                G = k2.Fsa.from_openfst(f.read(), acceptor=False).to(device)
         elif path.endswith(".pt"):
             if not os.path.isfile(path):
                 raise FileNotFoundError(f"File {path} not found.")
-            d = torch.load(path, map_location=self.device)
-            G = k2.Fsa.from_dict(d).to(self.device)
+            d = torch.load(path, map_location=device)
+            G = k2.Fsa.from_dict(d)#.to(self.device)
         else:
             raise ValueError(f"File {path} is not a .fst.txt or .pt file.")
         if save:
@@ -127,7 +133,7 @@ class GraphCompiler(ABC):
         """
         path = str(path or self.rescoring_lm_path)
         logger.info(f"Loading rescoring LM: {path}")
-        G = self.get_G(path, save=False).to("cpu")
+        G = self.get_G(path, save=False, device=torch.device("cpu"))
         del G.aux_labels
         G.labels[G.labels >= self.lexicon.word_table["#0"]] = 0
         G.__dict__["_properties"] = None
@@ -241,8 +247,7 @@ class GraphCompiler(ABC):
         Usually, you don't need to call this function explicitly.
         '''
         H = self.ctc_topo.to("cpu")
-        G = self.get_G()
-        G = G.to("cpu")
+        G = self.get_G(device=torch.device("cpu"))
         L = self.lexicon.L_disambig.to("cpu")
 
         first_token_disambig_id = self.lexicon.token_table["#0"]
@@ -409,7 +414,8 @@ class CtcTrainingGraphCompiler(GraphCompiler):
                is_test: bool = True,
                stage: sb.Stage = sb.Stage.TEST,
                lm_scale_list: Optional[List[float]] = None,
-               rescoring_lm_path: Optional[Path] = None
+               rescoring_lm_path: Optional[Path] = None,
+               force_device: Optional[torch.device] = None,
         ) -> Union[List[str], Dict[str, List[str]]]:
         """
         Decode the given log_probs with self.decoding_graph without language model.
@@ -430,7 +436,9 @@ class CtcTrainingGraphCompiler(GraphCompiler):
           lm_scale_list: List[float], a list of language model scale factors. Defaults to [0.6].
           rescoring_lm_path: Path, path to the LM to be used for rescoring. If not provided
             and the decoding method is whole-lattice-rescoring, then you need to provide
-            the `rescoring_lm_path` in the constructor of this class.          
+            the `rescoring_lm_path` in the constructor of this class.
+          force_device: torch.device, if provided, then the decoding graph will be moved
+            to this device before decoding.
 
         Returns:
           If decoding_method==1best: a list of strings, each of which is the decoding 
@@ -440,7 +448,11 @@ class CtcTrainingGraphCompiler(GraphCompiler):
             are the language model scale factors used for rescoring.
         """
         lm_scale_list = lm_scale_list or [0.6]
-        device = log_probs.device
+        if force_device is not None and isinstance(force_device, torch.device):
+            device = force_device
+            log_probs = log_probs.to(device)
+        else:
+            device = log_probs.device
         if self.decoding_graph is None:
             if is_test:
                 self.lexicon.log_unknown_warning = False
@@ -456,7 +468,7 @@ class CtcTrainingGraphCompiler(GraphCompiler):
             if self.decoding_method == "whole-lattice-rescoring":
                 # fst_4gram_path = str(Path(self.G_path).parent / "G_4_gram.fst.txt")
                 # fst_4gram_path = "lm/G_4_gram_withfullwords.fst.txt"
-                self.rescoring_graph = self.get_rescoring_LM(rescoring_lm_path).to(self.device)
+                self.rescoring_graph = self.get_rescoring_LM(rescoring_lm_path).to(device)
         # If stage != TEST then we always do 1best decoding
         decoding_method = self.decoding_method if stage == sb.Stage.TEST else "1best"
         
@@ -495,7 +507,7 @@ class CtcTrainingGraphCompiler(GraphCompiler):
                 out = lattice2text(best_path[key])
             elif decoding_method == "whole-lattice-rescoring":
                 best_path = rescore_with_whole_lattice(
-                    lattice=lattice.to(self.device),
+                    lattice=lattice.to(device),
                     G_with_epsilon_loops=self.rescoring_graph,
                     lm_scale_list=lm_scale_list,
                     use_double_scores=True,
@@ -571,8 +583,14 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
         self.eos_id = eos_id
         self.P_path = P_path
         self._p = None
+        self._ctc_topo_P = None
 
-        self.build_ctc_topo_P()
+    @property
+    def ctc_topo_P(self):
+        if self._ctc_topo_P is None:
+            # build it on demand
+            self.build_ctc_topo_P()
+        return self._ctc_topo_P
 
     @property
     def P(self) -> k2.Fsa:
@@ -586,8 +604,8 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
         return self._p
 
     def build_ctc_topo_P(self):
-        """Built ctc_topo_P, the composition result of
-        ctc_topo and P, where P is a pre-trained bigram
+        """Build ctc_topo_P, the composition result of
+        ctc_topo and P, where P is a pre-trained n-gram
         word piece LM.
         """
         # Note: there is no need to save a pre-compiled P and ctc_topo
@@ -620,12 +638,11 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
 
         ctc_topo_inv = k2.arc_sort(self.ctc_topo.invert_())
 
-        logger.info("Building ctc_topo_P")
         ctc_topo_P = k2.intersect(
             ctc_topo_inv, P_with_self_loops, treat_epsilons_specially=False
         ).invert()
 
-        self.ctc_topo_P = k2.arc_sort(ctc_topo_P)
+        self._ctc_topo_P = k2.arc_sort(ctc_topo_P)
         logger.info(f"ctc_topo_P num_arcs: {self.ctc_topo_P.num_arcs}")
 
     def compile(
@@ -688,3 +705,35 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
             den = ctc_topo_P_vec
 
         return num, den
+    
+    def decode(self,
+               log_probs: torch.Tensor,
+               input_lens: torch.Tensor,
+               search_beam=5,
+               output_beam=5,
+               ac_scale=1.0,
+               min_active_states=300,
+               max_active_states=1000,
+               is_test: bool = True,
+               stage: sb.Stage = sb.Stage.TEST,
+               lm_scale_list: Optional[List[float]] = None,
+               rescoring_lm_path: Optional[Path] = None,
+               force_device: Optional[torch.device] = None,
+        ) -> Union[List[str], Dict[str, List[str]]]:
+        # Make sure we cleanup unsused variables for decoding
+        if getattr(self, "_p", None):
+          del self._p
+        return super().decode(
+            log_probs=log_probs,
+            input_lens=input_lens,
+            search_beam=search_beam,
+            output_beam=output_beam,
+            ac_scale=ac_scale,
+            min_active_states=min_active_states,
+            max_active_states=max_active_states,
+            is_test=is_test,
+            stage=stage,
+            lm_scale_list=lm_scale_list,
+            rescoring_lm_path=rescoring_lm_path,
+            force_device=force_device,
+        )

@@ -1,4 +1,5 @@
 # Copyright      2023 the University of Edinburgh (Zeyu Zhao)
+import logging
 from typing import List
 
 import k2
@@ -6,6 +7,9 @@ import torch
 from torch import nn
 
 from .graph_compiler import GraphCompiler
+
+
+logger = logging.getLogger(__name__)
 
 
 def ctc_k2(
@@ -125,25 +129,27 @@ def mmi_k2(
         reduction="mean",
     ):
     input_lens = (input_lens * log_probs.shape[1]).round().int()
+    # logger.info(f" Original {input_lens=}")
     
     indices = torch.argsort(input_lens, descending=True)
     input_lens = input_lens[indices]
-    log_probs = log_probs[indices]
+    # log_probs = log_probs[indices]
     texts = [texts[i] for i in indices]
 
     if not all(input_lens[i] >= input_lens[i+1] for i in range(len(input_lens) - 1)):
         raise ValueError(f"input_lens must be sorted in decreasing order but got {input_lens}")
 
-    batch_size = log_probs.shape[0]
+    # batch_size = log_probs.shape[0]
 
     supervision_segments = torch.tensor(
         [
-            [i, 0, torch.floor(input_lens[i]/subsampling_factor).item()] \
-                for i in range(batch_size)
+            [idx, 0, torch.floor(input_lens[i]/subsampling_factor).item()] \
+                for i, idx in enumerate(indices)
         ],
         device="cpu",
         dtype=torch.int32,
     )
+    # logger.info(f"{supervision_segments=}")
 
     dense_fsa_vec = k2.DenseFsaVec(
         log_probs,
@@ -207,6 +213,84 @@ class LFMMILoss(nn.Module):
             This is the non-optimized version of the mmi computation.
         """
 
+        # TODO: Use the pruned version only when we use bpe units (i.e. larger
+        # log_probs matrix). Otherwise, use the exact version.
+        tot_scores = self.compute_tot_scores_pruned(dense_fsa_vec, texts)
+
+        if self.reduction == "mean":
+            # If reduction is mean then we need to divide the loss of
+            # each utterance by its length.
+            # loss = mmi_loss / input_lens
+            loss = -1 * (tot_scores / input_lens.to(tot_scores.dtype).to(tot_scores.device))
+            # if loss.mean() > 2000:
+            #     print(f"MMI loss got to inf {loss} for {texts}", end="  ")        
+            return loss.mean()
+        else:
+            loss = -1 * tot_scores.sum()
+        return loss
+    
+    def compute_tot_scores_pruned(
+        self,
+        dense_fsa_vec: k2.DenseFsaVec,
+        texts: List[str],
+    ) -> torch.Tensor:
+        """
+        See :func:`_compute_mmi_loss_exact_optimized` for the meaning
+        of the arguments.
+
+        `pruned` means it uses k2.intersect_dense_pruned
+
+        Note:
+        It uses the least amount of memory, but the loss is not exact due
+        to pruning.
+        """
+        num_graphs, den_graphs = self.graph_compiler.compile(texts, replicate_den=False)
+
+        num_lats = k2.intersect_dense(num_graphs, dense_fsa_vec, output_beam=self.beam_size)
+
+        # the values for search_beam/output_beam/min_active_states/max_active_states
+        # are not tuned. You may want to tune them.
+        den_lats = k2.intersect_dense_pruned(
+            den_graphs,
+            dense_fsa_vec,
+            search_beam=20.0,
+            output_beam=self.beam_size,
+            min_active_states=30,
+            max_active_states=1000,
+        )
+
+        num_tot_scores = num_lats.get_tot_scores(log_semiring=True, use_double_scores=True)
+
+        den_tot_scores = den_lats.get_tot_scores(log_semiring=True, use_double_scores=True)
+
+        tot_scores = num_tot_scores - self.den_scale * den_tot_scores
+
+        return tot_scores
+    
+    def compute_tot_scores_exact(
+        self,
+        dense_fsa_vec: k2.DenseFsaVec,
+        texts: List[str],
+    ) -> torch.Tensor:
+        """
+        Args:
+          dense_fsa_vec:
+            It contains the neural network output.
+          texts:
+            A list of strings. Each string contains space(s) separated words.
+          input_lens:
+            A 1-D tensor of dtype ``torch.int32`` containing the lengths of
+            neural network output. Must have ``input_lens.dim() == 1``.
+        Returns:
+            Return a scalar loss. It is the sum over utterances in a batch,
+            without normalization.
+    
+        Disclaimer:
+            This function is adapted from the `icefall` repository.
+            See icefall/icefall/mmi.py for the original source code.
+            This is the non-optimized version of the mmi computation.
+        """
+
         num_graphs, den_graphs = self.graph_compiler.compile(texts, replicate_den=True)
 
         # TODO: pass output_beam as function argument
@@ -222,15 +306,5 @@ class LFMMILoss(nn.Module):
         den_tot_scores = den_lats.get_tot_scores(log_semiring=True, use_double_scores=True)
 
         tot_scores = num_tot_scores - self.den_scale * den_tot_scores
-
-        if self.reduction == "mean":
-            # If reduction is mean then we need to divide the loss of
-            # each utterance by its length.
-            # loss = mmi_loss / input_lens
-            loss = -1 * (tot_scores / input_lens.to(tot_scores.dtype).to(tot_scores.device))
-            if loss.mean() > 2000:
-                print(f"MMI loss got to inf {loss} for {texts}", end="  ")        
-            return loss.mean()
-        else:
-            loss = -1 * tot_scores.sum()
-        return loss
+        
+        return tot_scores

@@ -30,9 +30,9 @@ train_csv: !ref <output_folder>/train.csv
 valid_csv: !ref <output_folder>/dev-clean.csv
 test_csv:
    - !ref <output_folder>/test-clean.csv
-   - !ref <output_folder>/test-other.csv
-   - !ref <output_folder>/dev-clean.csv
-   - !ref <output_folder>/dev-other.csv
+   # - !ref <output_folder>/test-other.csv
+   # - !ref <output_folder>/dev-clean.csv
+   # - !ref <output_folder>/dev-other.csv
 
 # Training parameters
 number_of_epochs: 1
@@ -173,8 +173,8 @@ subsample_factor: 1
 # For k2 decoding
 test_search_beam: 32
 # Beam size (for decoding)
-test_output_beam: 8
-test_max_active_state: 3000
+test_output_beam: 6
+test_max_active_state: 1000
 # Acoustic scale (mutliplied by the log probs)
 ac_scale: 1.5
 use_HLG: False
@@ -195,5 +195,7 @@ lm_scale_list: [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4]
 # features is smaller than the number of characters in the
 # transcription
 upsampling: True
+
+fsts_suffix: !ref _<seed>
 
 token_type: char

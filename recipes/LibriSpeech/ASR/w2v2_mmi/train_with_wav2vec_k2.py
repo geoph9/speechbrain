@@ -25,7 +25,7 @@ import torch
 import logging
 import shutil
 from pathlib import Path
-from typing import List, Union
+from typing import List, Optional, Union
 
 import speechbrain as sb
 import sentencepiece as spm
@@ -139,16 +139,19 @@ class ASR(sb.Brain):
 
         if stage == sb.Stage.VALID:
             # Decode token terms to words
-            predicted_texts = self.graph_compiler.decode(
-                log_probs,
-                wav_lens,
-                ac_scale=self.hparams.ac_scale,
-                stage=stage,
-            ) # list of strings
-            predicted_words = [wrd.split(" ") for wrd in predicted_texts]
+            # predicted_texts = self.graph_compiler.decode(
+            #     log_probs,
+            #     wav_lens,
+            #     ac_scale=self.hparams.ac_scale,
+            #     stage=stage,
+            # ) # list of strings
+            # predicted_words = [wrd.split(" ") for wrd in predicted_texts]
+            # target_words = [wrd.split(" ") for wrd in texts]
+            # self.wer_metric.append(ids, predicted_words, target_words)
+            # self.cer_metric.append(ids, predicted_words, target_words)
             target_words = [wrd.split(" ") for wrd in texts]
-            self.wer_metric.append(ids, predicted_words, target_words)
-            self.cer_metric.append(ids, predicted_words, target_words)
+            self.wer_metric.append(ids, target_words, target_words)
+            self.cer_metric.append(ids, target_words, target_words)
         if stage == sb.Stage.TEST:  # Language model decoding only used for test
             if self.hparams.use_language_modelling:
                 raise NotImplementedError(
@@ -585,7 +588,8 @@ def arpa_to_fst(
         output_dir: Path,
         words_txt: Path,
         disambig_symbol: str = "#0",
-        convert_4gram: bool = True
+        convert_4gram: bool = True,
+        suffix: Optional[str] = "",
     ):
     """ Use kaldilm to convert an ARPA LM to FST. For example, in librispeech
     you can find a 3-gram (pruned) and a 4-gram ARPA LM in the openslr
@@ -608,6 +612,10 @@ def arpa_to_fst(
         disambig_symbol: The disambiguation symbol to use.
         convert_4gram: If True, then we will convert the 4-gram ARPA LM to
             FST. Otherwise, we will only convert the 3-gram ARPA LM to FST.
+        suffix: A suffix to add to the 3gram (and 4gram) FST. This is useful
+            when you want to run multiple experiments that use different LMs
+            (i.e. the words.txt file that's used for their creation is 
+            different in each case).
     
     Raises:
         ImportError: If kaldilm is not installed.
@@ -646,13 +654,13 @@ def arpa_to_fst(
             f.write(s)
     # 3-gram arpa to fst conversion...
     arpa_path = arpa_dir / "3-gram.pruned.1e-7.arpa"
-    fst_path = output_dir / "G_3_gram.fst.txt"
+    fst_path = output_dir / f"G_3_gram{suffix}.fst.txt"
     _arpa_to_fst_single(arpa_path, fst_path, max_order=3)
     # Optionnal 4-gram arpa to fst conversion
     if convert_4gram:
         # arpa_path = arpa_dir / "4-gram.arpa"
         arpa_path = arpa_dir / "4-gram.arpa"
-        fst_path = output_dir / "G_4_gram.fst.txt"
+        fst_path = output_dir / f"G_4_gram{suffix}.fst.txt"
         _arpa_to_fst_single(arpa_path, fst_path, max_order=4)
 
 def create_P_fst(
@@ -821,14 +829,6 @@ if __name__ == "__main__":
         #     annotation_format="csv",
         #     add_dummy_prefix=False,
         # )
-        # Create the lang directory for k2 training
-        run_on_main(
-            prepare_lang_bpe,
-            kwargs={
-                "lang_dir": hparams["lang_dir"],
-                "tokenizer": tokenizer,
-            },
-        )
 
     # here we create the datasets objects as well as tokenization and encoding
     train_data, valid_data, test_datasets = dataio_prepare(hparams)
@@ -855,6 +855,15 @@ if __name__ == "__main__":
                 "sil_prob": hparams["sil_prob"],
             },
         )
+    else:
+        # Create the lang directory for k2 training with BPE
+        run_on_main(
+            prepare_lang_bpe,
+            kwargs={
+                "lang_dir": hparams["lang_dir"],
+                "tokenizer": tokenizer,
+            },
+        )
 
 
     lexicon = Lexicon(hparams["lang_dir"])
@@ -875,8 +884,9 @@ if __name__ == "__main__":
 
     need_G = False
     rescoring_lm_path = None
+    fsts_suffix = hparams.get("fsts_suffix", "")
     if getattr(asr_brain.hparams, "use_HLG", False) in [True, "True"]:
-        G_path = Path(asr_brain.hparams.lm_dir) / "G_3_gram.fst.txt"
+        G_path = Path(asr_brain.hparams.lm_dir) / f"G_3_gram{fsts_suffix}.fst.txt"
         logger.info(f"Will load LM from {G_path}")
         need_G = True
     else:
@@ -895,9 +905,10 @@ if __name__ == "__main__":
                 "output_dir": Path(asr_brain.hparams.lm_dir),
                 "words_txt": Path(asr_brain.hparams.lang_dir) / "words.txt",
                 "convert_4gram": need_4gram,
+                "suffix": fsts_suffix
             },
         )
-        rescoring_lm_path = Path(asr_brain.hparams.lm_dir) / "G_4_gram.fst.txt"
+        rescoring_lm_path = Path(asr_brain.hparams.lm_dir) / f"G_4_gram{fsts_suffix}.fst.txt"
     if need_G:
         assert G_path.is_file(), f"{G_path} does not exist"
 

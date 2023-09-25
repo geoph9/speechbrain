@@ -173,10 +173,10 @@ subsample_factor: 1
 # For k2 decoding
 test_search_beam: 32
 # Beam size (for decoding)
-test_output_beam: 8
-test_max_active_state: 3000
+test_output_beam: 6
+test_max_active_state: 1000
 # Acoustic scale (mutliplied by the log probs)
-ac_scale: 1.5
+ac_scale: 1.0
 use_HLG: False
 # 1best or whole-lattice-rescoring
 decoding_method: 1best
@@ -195,6 +195,8 @@ lm_scale_list: [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4]
 # features is smaller than the number of characters in the
 # transcription
 upsampling: True
+
+fsts_suffix: !ref _<seed>
 
 # BPE tokenization
 token_type: bpe
