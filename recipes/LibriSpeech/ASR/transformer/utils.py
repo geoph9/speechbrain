@@ -1,5 +1,6 @@
 
 import os
+import shutil
 import logging
 from pathlib import Path
 from typing import List, Optional
@@ -7,6 +8,7 @@ from typing import List, Optional
 from speechbrain.tokenizers.SentencePiece import SentencePiece
 from speechbrain.k2_integration.lexicon import Lexicon
 from speechbrain.k2_integration.make_kn_lm import make_kn_lm
+import sentencepiece as spm
 
 
 logger = logging.getLogger(__name__)
@@ -107,7 +109,8 @@ def arpa_to_fst(
         output_dir: Path,
         words_txt: Path,
         disambig_symbol: str = "#0",
-        convert_4gram: bool = True
+        convert_4gram: bool = True,
+        suffix: Optional[str] = "",
     ):
     """ Use kaldilm to convert an ARPA LM to FST. For example, in librispeech
     you can find a 3-gram (pruned) and a 4-gram ARPA LM in the openslr
@@ -130,6 +133,10 @@ def arpa_to_fst(
         disambig_symbol: The disambiguation symbol to use.
         convert_4gram: If True, then we will convert the 4-gram ARPA LM to
             FST. Otherwise, we will only convert the 3-gram ARPA LM to FST.
+        suffix: A suffix to add to the 3gram (and 4gram) FST. This is useful
+            when you want to run multiple experiments that use different LMs
+            (i.e. the words.txt file that's used for their creation is 
+            different in each case).
     
     Raises:
         ImportError: If kaldilm is not installed.
@@ -168,13 +175,13 @@ def arpa_to_fst(
             f.write(s)
     # 3-gram arpa to fst conversion...
     arpa_path = arpa_dir / "3-gram.pruned.1e-7.arpa"
-    fst_path = output_dir / "G_3_gram.fst.txt"
+    fst_path = output_dir / f"G_3_gram{suffix}.fst.txt"
     _arpa_to_fst_single(arpa_path, fst_path, max_order=3)
     # Optionnal 4-gram arpa to fst conversion
     if convert_4gram:
         # arpa_path = arpa_dir / "4-gram.arpa"
         arpa_path = arpa_dir / "4-gram.arpa"
-        fst_path = output_dir / "G_4_gram.fst.txt"
+        fst_path = output_dir / f"G_4_gram{suffix}.fst.txt"
         _arpa_to_fst_single(arpa_path, fst_path, max_order=4)
 
 def create_P_fst(
@@ -237,3 +244,53 @@ def create_P_fst(
     logger.info(f"Writing {fst_path}")
     with open(fst_path, "w") as f:
         f.write(s)
+
+
+
+def get_bpe_tokenizer(hparams) -> spm.SentencePieceProcessor:
+    """Get the BPE tokenizer. If the BPE model does not exist, then we will
+    train it using SentencePiece.
+
+    Args:
+        hparams: The hyperparameters from a yaml file (e.g. hparams/train_hf_wav2vec_k2_mmi_bpe.yaml)
+
+    Returns:
+        The SentencePiece tokenizer.
+    """
+    n_tokens = hparams["output_neurons"]
+    model_prefix = Path(hparams["lang_dir"]) / f"bpe_{n_tokens}"
+    model_file = model_prefix.with_suffix(".model")
+    if not model_file.is_file():
+        with open(hparams["train_csv"]) as f:
+            texts = [line.strip().split(",")[-1] for line in f.readlines()[1:]]
+        transcripts_path = model_file.parent / "train_transcripts.txt"
+        with open(transcripts_path, "w") as f:
+            f.write("\n".join(texts))
+        user_defined_symbols = ["<blk>", "<sos/eos>"]
+        # if hparams["add_word_boundary"]:
+        #     user_defined_symbols += ["<eow>"]
+        unk_id = len(user_defined_symbols)
+        logger.info(f"Saving a BPE model into {model_file}")
+        spm.SentencePieceTrainer.train(
+            input=str(transcripts_path),
+            vocab_size=n_tokens,
+            model_type="bpe",
+            model_prefix=f"bpe_{n_tokens}",
+            input_sentence_size=100000000,
+            character_coverage=1.0,
+            user_defined_symbols=user_defined_symbols,
+            unk_id=unk_id,
+            bos_id=-1,
+            eos_id=-1,
+        )
+        shutil.move(
+            f"bpe_{n_tokens}.model",
+            str(model_file),
+        )
+        shutil.move(
+            f"bpe_{n_tokens}.vocab",
+            str(model_prefix.with_suffix(".vocab")),
+        )
+    tokenizer = spm.SentencePieceProcessor()
+    tokenizer.load(str(model_file))
+    return tokenizer

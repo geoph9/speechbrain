@@ -31,16 +31,18 @@ import logging
 from pathlib import Path
 
 import speechbrain as sb
+from tqdm import tqdm
 from hyperpyyaml import load_hyperpyyaml
+from speechbrain.dataio.dataloader import LoopedLoader
+from torch.utils.data import DataLoader
 from speechbrain.lobes.models.transformer.TransformerASR import EncoderWrapper
-from speechbrain.tokenizers.SentencePiece import SentencePiece
 from speechbrain.utils.distributed import run_on_main, if_main_process
 from speechbrain.k2_integration.prepare_lang import prepare_lang
+from speechbrain.k2_integration.prepare_lang_bpe import prepare_lang as prepare_lang_bpe
 from speechbrain.k2_integration.lexicon import Lexicon
-from speechbrain.k2_integration.make_kn_lm import make_kn_lm
 from speechbrain.k2_integration.graph_compiler import MmiTrainingGraphCompiler
 
-from utils import get_lexicon, arpa_to_fst, create_P_fst
+from utils import get_lexicon, arpa_to_fst, create_P_fst, get_bpe_tokenizer
 
 
 logger = logging.getLogger(__name__)
@@ -129,9 +131,10 @@ class ASR(sb.core.Brain):
         #     raise NotImplementedError("Only ascending or descending sorting is implemented, but got {}".format(self.hparams.sorting))
 
         is_training = (stage == sb.Stage.TRAIN)
-        if stage == sb.Stage.TEST:
-            loss = torch.empty(0, device=self.device)
-        else:
+        current_epoch = self.hparams.epoch_counter.current
+        if is_training or (
+            stage == sb.Stage.VALID and current_epoch % self.hparams.validate_every == 0
+        ):
             loss = self.hparams.mmi_cost(
                 log_probs=log_probs, 
                 input_lens=wav_lens, 
@@ -139,19 +142,24 @@ class ASR(sb.core.Brain):
                 texts=texts,
                 is_training=is_training,
             )
+        else:
+            loss = torch.empty(0, device=self.device)
 
         if stage == sb.Stage.VALID:
             # Decode token terms to words
-            predicted_texts = self.graph_compiler.decode(
-                log_probs,
-                wav_lens,
-                ac_scale=self.hparams.ac_scale,
-                stage=stage,
-            ) # list of strings
-            predicted_words = [wrd.split(" ") for wrd in predicted_texts]
-            target_words = [wrd.split(" ") for wrd in texts]
-            self.wer_metric.append(ids, predicted_words, target_words)
-            self.cer_metric.append(ids, predicted_words, target_words)
+            if current_epoch % self.hparams.validate_every == 0:
+                predicted_texts = self.graph_compiler.decode(
+                    log_probs,
+                    wav_lens,
+                    ac_scale=self.hparams.ac_scale,
+                    stage=stage,
+                ) # list of strings
+                predicted_words = [wrd.split(" ") for wrd in predicted_texts]
+                target_words = [wrd.split(" ") for wrd in texts]
+                self.wer_metric.append(ids, predicted_words, target_words)
+                self.cer_metric.append(ids, predicted_words, target_words)
+                # cleanup graph compiler to save memory
+                del self.graph_compiler.decoding_graph, self.graph_compiler.rescoring_graph
         elif stage == sb.Stage.TEST:  # Language model decoding only used for test
             if self.hparams.use_language_modelling:
                 raise NotImplementedError(
@@ -186,6 +194,108 @@ class ASR(sb.core.Brain):
             # # compute the accuracy of the one-step-forward prediction
             # self.acc_metric.append(log_probs, tokens_eos, tokens_eos_lens)
         return loss
+    
+    def evaluate(
+        self,
+        test_set,
+        max_key=None,
+        min_key=None,
+        progressbar=None,
+        test_loader_kwargs={},
+    ):
+        """Iterate test_set and evaluate brain performance. By default, loads
+        the best-performing checkpoint (as recorded using the checkpointer).
+
+        Arguments
+        ---------
+        test_set : Dataset, DataLoader
+            If a DataLoader is given, it is iterated directly. Otherwise passed
+            to ``self.make_dataloader()``.
+        max_key : str
+            Key to use for finding best checkpoint, passed to
+            ``on_evaluate_start()``.
+        min_key : str
+            Key to use for finding best checkpoint, passed to
+            ``on_evaluate_start()``.
+        progressbar : bool
+            Whether to display the progress in a progressbar.
+        test_loader_kwargs : dict
+            Kwargs passed to ``make_dataloader()`` if ``test_set`` is not a
+            DataLoader. NOTE: ``loader_kwargs["ckpt_prefix"]`` gets
+            automatically overwritten to ``None`` (so that the test DataLoader
+            is not added to the checkpointer).
+
+        Returns
+        -------
+        average test loss
+        """
+        if progressbar is None:
+            progressbar = not self.noprogressbar
+
+        if not (
+            isinstance(test_set, DataLoader)
+            or isinstance(test_set, LoopedLoader)
+        ):
+            test_loader_kwargs["ckpt_prefix"] = None
+            test_set = self.make_dataloader(
+                test_set, sb.Stage.TEST, **test_loader_kwargs
+            )
+        self.on_evaluate_start(max_key=max_key, min_key=min_key)
+        self.on_stage_start(sb.Stage.TEST, epoch=None)
+        self.modules.eval()
+        with torch.no_grad():
+            for batch in tqdm(
+                test_set,
+                dynamic_ncols=True,
+                disable=not progressbar,
+                colour=self.tqdm_barcolor["test"],
+            ):
+                self.step += 1
+                _ = self.evaluate_batch(batch, stage=sb.Stage.TEST)
+
+                # Profile only if desired (steps allow the profiler to know when all is warmed up)
+                if self.profiler is not None:
+                    if self.profiler.record_steps:
+                        self.profiler.step()
+
+                # Debug mode only runs a few batches
+                if self.debug and self.step == self.debug_batches:
+                    break
+
+            self.on_stage_end(sb.Stage.TEST, None, None)
+        self.step = 0
+        return
+
+    def _fit_valid(self, valid_set, epoch, enable):
+        if epoch % self.hparams.validate_every != 0:
+            return
+        # Validation stage
+        if valid_set is not None:
+            self.on_stage_start(sb.Stage.VALID, epoch)
+            self.modules.eval()
+            avg_valid_loss = 0.0
+            with torch.no_grad():
+                for batch in tqdm(
+                    valid_set,
+                    dynamic_ncols=True,
+                    disable=not enable,
+                    colour=self.tqdm_barcolor["valid"],
+                ):
+                    self.step += 1
+                    loss = self.evaluate_batch(batch, stage=sb.Stage.VALID)
+                    avg_valid_loss = self.update_average(loss, avg_valid_loss)
+
+                    # Profile only if desired (steps allow the profiler to know when all is warmed up)
+                    if self.profiler is not None:
+                        if self.profiler.record_steps:
+                            self.profiler.step()
+
+                    # Debug mode only runs a few batches
+                    if self.debug and self.step == self.debug_batches:
+                        break
+
+                self.step = 0
+                self.on_stage_end(sb.Stage.VALID, avg_valid_loss, epoch)
 
     def fit_batch(self, batch):
 
@@ -237,8 +347,13 @@ class ASR(sb.core.Brain):
     def on_stage_start(self, stage, epoch):
         """Gets called at the beginning of each epoch"""
         if stage != sb.Stage.TRAIN:
+            current_epoch = self.hparams.epoch_counter.current
             self.acc_metric = self.hparams.acc_computer()
-            if stage == sb.Stage.VALID or self.hparams.decoding_method == "1best":
+            if (
+                    stage == sb.Stage.TEST and self.hparams.decoding_method == "1best"
+                ) or (
+                    stage == sb.Stage.VALID and current_epoch % self.hparams.validate_every == 0
+                ):
                 self.cer_metric = self.hparams.cer_computer()
                 self.wer_metric = self.hparams.error_rate_computer()
             else:  # stage is TEST and dec-method is whole-lattice or nbest rescoring
@@ -252,9 +367,14 @@ class ASR(sb.core.Brain):
         """Gets called at the end of a epoch."""
         # Compute/store important stats
         stage_stats = {"loss": stage_loss}
+        current_epoch = self.hparams.epoch_counter.current
         if stage == sb.Stage.TRAIN:
             self.train_stats = stage_stats
-        elif stage == sb.Stage.VALID or self.hparams.decoding_method == "1best":
+        elif (
+                stage == sb.Stage.TEST and self.hparams.decoding_method == "1best"
+            ) or (
+                stage == sb.Stage.VALID and current_epoch % self.hparams.validate_every == 0
+            ):
             # stage_stats["ACC"] = self.acc_metric.summarize()  # TODO: Implement in compute_objectives
             stage_stats["CER"] = self.cer_metric.summarize("error_rate")
             stage_stats["WER"] = self.wer_metric.summarize("error_rate")
@@ -399,10 +519,6 @@ def dataio_prepare(hparams):
     datasets = [train_data, valid_data] + [i for k, i in test_datasets.items()]
     valtest_datasets = [valid_data] + [i for k, i in test_datasets.items()]
 
-    # We get the tokenizer as we need it to encode the labels when creating
-    # mini-batches.
-    tokenizer = hparams["tokenizer"]
-
     # 2. Define audio pipeline:
     @sb.utils.data_pipeline.takes("wav")
     @sb.utils.data_pipeline.provides("sig")
@@ -541,20 +657,8 @@ if __name__ == "__main__":
     )
 
     tokenizer = None
-    if hparams.get("token_type", "char") == "bpe":
-        tokenizer = SentencePiece(
-            model_dir=os.path.join(hparams["output_folder"], "spm"),
-            vocab_size=hparams["output_neurons"],
-            annotation_train=hparams["train_csv"],
-            annotation_read="wrd",
-            model_type=hparams["token_type"],  # must be bpe
-            character_coverage=1.0,
-            bos_id=-1,
-            eos_id=-1,
-            pad_id=-1,
-            unk_id=0,
-            annotation_format="csv",
-        )
+    if hparams["token_type"] == "bpe":
+        tokenizer = get_bpe_tokenizer(hparams)
 
     # # here we create the datasets objects as well as tokenization and encoding
     # (
@@ -587,14 +691,24 @@ if __name__ == "__main__":
         },
     )
 
-    # Create the lang directory for k2 training
-    run_on_main(
-        prepare_lang,
-        kwargs={
-            "lang_dir": hparams["lang_dir"],
-            "sil_prob": hparams["sil_prob"],
-        },
-    )
+    if hparams["token_type"] == "char":
+        # Create the lang directory for k2 training
+        run_on_main(
+            prepare_lang,
+            kwargs={
+                "lang_dir": hparams["lang_dir"],
+                "sil_prob": hparams["sil_prob"],
+            },
+        )
+    else:
+        # Create the lang directory for k2 training with BPE
+        run_on_main(
+            prepare_lang_bpe,
+            kwargs={
+                "lang_dir": hparams["lang_dir"],
+                "tokenizer": tokenizer,
+            },
+        )
 
 
     lexicon = Lexicon(hparams["lang_dir"])
@@ -616,8 +730,9 @@ if __name__ == "__main__":
 
     need_G = False
     rescoring_lm_path = None
+    fsts_suffix = hparams.get("fsts_suffix", "")
     if getattr(asr_brain.hparams, "use_HLG", False) in [True, "True"]:
-        G_path = Path(asr_brain.hparams.lm_dir) / "G_3_gram.fst.txt"
+        G_path = Path(asr_brain.hparams.lm_dir) / f"G_3_gram{fsts_suffix}.fst.txt"
         logger.info(f"Will load LM from {G_path}")
         need_G = True
     else:
@@ -636,9 +751,10 @@ if __name__ == "__main__":
                 "output_dir": Path(asr_brain.hparams.lm_dir),
                 "words_txt": Path(asr_brain.hparams.lang_dir) / "words.txt",
                 "convert_4gram": need_4gram,
+                "suffix": fsts_suffix
             },
         )
-        rescoring_lm_path = Path(asr_brain.hparams.lm_dir) / "G_4_gram.fst.txt"
+        rescoring_lm_path = Path(asr_brain.hparams.lm_dir) / f"G_4_gram{fsts_suffix}.fst.txt"
     if need_G:
         assert G_path.is_file(), f"{G_path} does not exist"
 
