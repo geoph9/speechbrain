@@ -22,13 +22,26 @@ def ctc_k2(
         use_double_scores=True,
         is_training=True,
         delay_penalty=0.,
+        subsampling_factor=1,
     ):
     input_lens = (input_lens * log_probs.shape[1]).round().int()
+    # logger.info(f" Original {input_lens=}")
+    
+    indices = torch.argsort(input_lens, descending=True)
+    input_lens = input_lens[indices]
+    # log_probs = log_probs[indices]
+    texts = [texts[i] for i in indices]
 
-    batch_size = log_probs.shape[0]
+    if not all(input_lens[i] >= input_lens[i+1] for i in range(len(input_lens) - 1)):
+        raise ValueError(f"input_lens must be sorted in decreasing order but got {input_lens}")
+
+    # batch_size = log_probs.shape[0]
 
     supervision_segments = torch.tensor(
-        [[i, 0, input_lens[i]] for i in range(batch_size)],
+        [
+            [idx, 0, torch.floor(input_lens[i]/subsampling_factor).item()] \
+                for i, idx in enumerate(indices)
+        ],
         device="cpu",
         dtype=torch.int32,
     )
@@ -40,6 +53,7 @@ def ctc_k2(
     dense_fsa_vec = k2.DenseFsaVec(
         log_probs,
         supervision_segments,
+        allow_truncate=subsampling_factor-1,
     )
     loss = k2.ctc_loss(
         delay_penalty=delay_penalty,
@@ -215,13 +229,14 @@ class LFMMILoss(nn.Module):
 
         # TODO: Use the pruned version only when we use bpe units (i.e. larger
         # log_probs matrix). Otherwise, use the exact version.
-        tot_scores = self.compute_tot_scores_pruned(dense_fsa_vec, texts)
+        # tot_scores = self.compute_tot_scores_pruned(dense_fsa_vec, texts)
+        tot_scores = self.compute_tot_scores_exact(dense_fsa_vec, texts)
 
         if self.reduction == "mean":
             # If reduction is mean then we need to divide the loss of
             # each utterance by its length.
             # loss = mmi_loss / input_lens
-            loss = -1 * (tot_scores / input_lens.to(tot_scores.dtype).to(tot_scores.device))
+            loss = -1 * (tot_scores / input_lens.to(tot_scores.device))
             # if loss.mean() > 2000:
             #     print(f"MMI loss got to inf {loss} for {texts}", end="  ")        
             return loss.mean()

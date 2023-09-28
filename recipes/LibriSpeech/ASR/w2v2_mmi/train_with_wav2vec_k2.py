@@ -108,14 +108,15 @@ class ASR(sb.Brain):
             )
             
         # Sort batch to be descending by length of wav files, which is demanded by k2
-        if self.hparams.sorting == "ascending":
-            log_probs = torch.flip(log_probs, (0,))
-            wav_lens = torch.flip(wav_lens, (0,))
-            texts = [batch.wrd[i] for i in reversed(range(len(batch.wrd)))]
-        elif self.hparams.sorting == "descending":
-            texts = batch.wrd
-        else:
-            raise NotImplementedError("Only ascending or descending sorting is implemented, but got {}".format(self.hparams.sorting))
+        # if self.hparams.sorting == "ascending":
+        #     log_probs = torch.flip(log_probs, (0,))
+        #     wav_lens = torch.flip(wav_lens, (0,))
+        #     texts = [batch.wrd[i] for i in reversed(range(len(batch.wrd)))]
+        # elif self.hparams.sorting == "descending":
+        #     texts = batch.wrd
+        # else:
+        #     raise NotImplementedError("Only ascending or descending sorting is implemented, but got {}".format(self.hparams.sorting))
+        texts = batch.wrd
 
         is_training = (stage == sb.Stage.TRAIN)
         if stage == sb.Stage.TEST:
@@ -130,12 +131,6 @@ class ASR(sb.Brain):
             )
 
             loss = loss_mmi
-        
-        # if loss > 2000:
-        #     logger.info(
-        #         f"Loss exploded to {loss} (loss_mmi={loss_mmi})."
-        #         f"  => on {ids=}"
-        #     )
 
         if stage == sb.Stage.VALID:
             # Decode token terms to words
@@ -808,24 +803,6 @@ if __name__ == "__main__":
     tokenizer = None
     if hparams["token_type"] == "bpe":
         tokenizer = get_bpe_tokenizer(hparams)
-        # user_defined_symbols = ["<blk>", "<sos/eos>"]
-        # if hparams["add_word_boundary"]:
-        #     user_defined_symbols += ["<eow>"]
-        # unk_id = len(user_defined_symbols)
-        # tokenizer = SentencePiece(
-        #     model_dir=os.path.join(hparams["output_folder"], "spm"),
-        #     vocab_size=hparams["output_neurons"],
-        #     annotation_train=hparams["train_csv"],
-        #     annotation_read="wrd",
-        #     user_defined_symbols=",".join(user_defined_symbols),
-        #     model_type=hparams["token_type"],  # must be bpe
-        #     character_coverage=1.0,
-        #     bos_id=-1,
-        #     eos_id=-1,
-        #     unk_id=unk_id,
-        #     annotation_format="csv",
-        #     add_dummy_prefix=False,
-        # )
 
     # here we create the datasets objects as well as tokenization and encoding
     train_data, valid_data, test_datasets = dataio_prepare(hparams)
@@ -930,6 +907,7 @@ if __name__ == "__main__":
         P_path=Path(asr_brain.hparams.lm_dir) / f"{P_model_name}.fst.txt",
         rescoring_lm_path=rescoring_lm_path,
         decoding_method=asr_brain.hparams.decoding_method,
+        subsampling_factor=asr_brain.hparams.subsample_factor,
     )
 
     # Add attributes to asr_brain

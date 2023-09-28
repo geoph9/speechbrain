@@ -22,15 +22,18 @@ Authors
 
 import os
 import sys
-from typing import List, Union
+import shutil
+from typing import List, Union, Optional
 import torch
 import logging
 import speechbrain as sb
+import sentencepiece as spm
 from speechbrain.utils.distributed import run_on_main, if_main_process
 from hyperpyyaml import load_hyperpyyaml
 from pathlib import Path
 
 from speechbrain.k2_integration.prepare_lang import prepare_lang
+from speechbrain.k2_integration.prepare_lang_bpe import prepare_lang as prepare_lang_bpe
 from speechbrain.k2_integration.graph_compiler import CtcTrainingGraphCompiler
 from speechbrain.k2_integration.lexicon import Lexicon
 
@@ -102,14 +105,15 @@ class ASR(sb.Brain):
             )
             
         # Sort batch to be descending by length of wav files, which is demanded by k2
-        if self.hparams.sorting == "ascending":
-            p_ctc = torch.flip(p_ctc, (0,))
-            wav_lens = torch.flip(wav_lens, (0,))
-            texts = [batch.wrd[i] for i in reversed(range(len(batch.wrd)))]
-        elif self.hparams.sorting == "descending":
-            texts = batch.wrd
-        else:
-            raise NotImplementedError("Only ascending or descending sorting is implemented, but got {}".format(self.hparams.sorting))
+        texts = batch.wrd
+        # if self.hparams.sorting == "ascending":
+        #     p_ctc = torch.flip(p_ctc, (0,))
+        #     wav_lens = torch.flip(wav_lens, (0,))
+        #     texts = [batch.wrd[i] for i in reversed(range(len(batch.wrd)))]
+        # elif self.hparams.sorting == "descending":
+        #     texts = batch.wrd
+        # else:
+        #     raise NotImplementedError("Only ascending or descending sorting is implemented, but got {}".format(self.hparams.sorting))
 
         is_training = (stage == sb.Stage.TRAIN)
         loss_ctc = self.hparams.ctc_cost(log_probs=p_ctc, 
@@ -126,7 +130,7 @@ class ASR(sb.Brain):
                 p_ctc,
                 wav_lens,
                 ac_scale=self.hparams.ac_scale,
-                decoding_method="1best"
+                stage=stage,
             ) # list of strings
             predicted_words = [wrd.split(" ") for wrd in predicted_texts]
             target_words = [wrd.split(" ") for wrd in texts]
@@ -150,8 +154,8 @@ class ASR(sb.Brain):
                     ac_scale=self.hparams.ac_scale,
                     max_active_states=self.hparams.test_max_active_state,
                     is_test=True,
-                    decoding_method=decoding_method,
                     lm_scale_list=self.hparams.lm_scale_list,
+                    stage=stage,
                 ) # list of strings
                 target_words: List[List[str]] = [wrd.split(" ") for wrd in texts]
                 if decoding_method == "1best":
@@ -402,21 +406,35 @@ def dataio_prepare(hparams):
 
     return train_data, valid_data, test_datasets
 
-def get_lexicon(lang_dir, 
-                csv_files, 
-                extra_vocab_files, 
-                add_word_boundary=True):
-    '''
-    Read csv_files to generate a $lang_dir/lexicon.txt for k2 training.
+
+
+def get_lexicon(
+        lang_dir, 
+        csv_files, 
+        extra_vocab_files, 
+        add_word_boundary=True,
+        unit_type="char",
+        tokenizer: spm.SentencePieceProcessor = None,
+    ):
+    '''Read csv_files to generate a $lang_dir/lexicon.txt for k2 training.
     This usually includes the csv files of the training set and the dev set in the output_folder.
     During training, we need to make sure that the lexicon.txt contains all (or the majority of) 
     the words in the training set and the dev set.
 
     Args:
-    lang_dir: the directory to store the lexicon.txt
-    csv_files: a list of csv file paths 
-    extra_vocab_files: a list of extra vocab files, librispeech-vocab.txt is an example
-    add_word_boundary: whether to add word boundary symbols <eow> at the end of each line to the lexicon for every word
+        lang_dir: str
+            the directory to store the lexicon.txt
+        csv_files: List[str]
+            a list of csv file paths which contain a transcript at their last column.
+        extra_vocab_files: List[str]
+            a list of extra vocab files, librispeech-vocab.txt is an example
+        add_word_boundary: bool
+            whether to add word boundary symbols <eow> at the end of each line to the 
+            lexicon for every word.
+        unit_type: str
+            the type of the units used in the lexicon. Can be "char" or "bpe".
+        tokenizer: spm.SentencePieceProcessor
+            the tokenizer used to tokenize the words. Only used when unit_type="bpe".
 
     Note that in each csv_file, the first line is the header, and the remaining lines are in the following format:
 
@@ -436,6 +454,15 @@ def get_lexicon(lang_dir,
     In this code, we simply use the characters in the word as the phones.
     You can use other phone sets, e.g., phonemes, BPEs, to train a better model.
     '''
+    def tokenize(word, add_word_boundary=True):
+        if unit_type == "char":
+            tokenized = list(word)
+        elif unit_type == "bpe":
+            # assert tokenizer is not None
+            tokenized = tokenizer.encode_as_pieces(word)
+        if add_word_boundary:
+            return tokenized + ["<eow>"]
+        return tokenized
     # Read train.csv, dev-clean.csv to generate a lexicon.txt for k2 training
     lexicon = dict()
     for file in csv_files:
@@ -445,15 +472,16 @@ def get_lexicon(lang_dir,
             # Read the remaining lines
             for line in f:
                 # Split the line 
-                _, _, _, _, trans = line.strip().split(",")
+                try:
+                    trans = line.strip().split(",")[-1]
+                except ValueError as e:
+                    print(line.strip().split(","))
+                    raise e
                 # Split the transcription into words
                 words = trans.split()
                 for word in words:
                     if word not in lexicon:
-                        if add_word_boundary:
-                            lexicon[word] = list(word) + ["<eow>"]
-                        else:
-                            lexicon[word] = list(word)
+                        lexicon[word] = tokenize(word, add_word_boundary)
 
     for file in extra_vocab_files:
         with open(file) as f:
@@ -462,10 +490,7 @@ def get_lexicon(lang_dir,
                 word = line.strip().split()[0]
                 # Split the transcription into words
                 if word not in lexicon:
-                    if add_word_boundary:
-                        lexicon[word] = list(word) + ["<eow>"]
-                    else:
-                        lexicon[word] = list(word)
+                    lexicon[word] = tokenize(word, add_word_boundary)
     # Write the lexicon to lang_dir/lexicon.txt
     os.makedirs(lang_dir, exist_ok=True)
     with open(os.path.join(lang_dir, "lexicon.txt"), "w") as f:
@@ -479,7 +504,8 @@ def arpa_to_fst(
         output_dir: Path,
         words_txt: Path,
         disambig_symbol: str = "#0",
-        convert_4gram: bool = True
+        convert_4gram: bool = True,
+        suffix: Optional[str] = "",
     ):
     """ Use kaldilm to convert an ARPA LM to FST. For example, in librispeech
     you can find a 3-gram (pruned) and a 4-gram ARPA LM in the openslr
@@ -502,6 +528,10 @@ def arpa_to_fst(
         disambig_symbol: The disambiguation symbol to use.
         convert_4gram: If True, then we will convert the 4-gram ARPA LM to
             FST. Otherwise, we will only convert the 3-gram ARPA LM to FST.
+        suffix: A suffix to add to the 3gram (and 4gram) FST. This is useful
+            when you want to run multiple experiments that use different LMs
+            (i.e. the words.txt file that's used for their creation is 
+            different in each case).
     
     Raises:
         ImportError: If kaldilm is not installed.
@@ -525,6 +555,7 @@ def arpa_to_fst(
         if not arpa_path.exists():
             raise FileNotFoundError(f"{arpa_path} not found while trying to create the {max_order} FST.")
         try:
+            logger.info("Converting {} to FST".format(arpa_path))
             s = arpa2fst(
                 input_arpa=str(arpa_path),
                 disambig_symbol=disambig_symbol,
@@ -537,14 +568,64 @@ def arpa_to_fst(
         logger.info(f"Writing {out_fst_path}")
         with open(out_fst_path, "w") as f:
             f.write(s)
+    # 3-gram arpa to fst conversion...
     arpa_path = arpa_dir / "3-gram.pruned.1e-7.arpa"
-    fst_path = output_dir / "G_3_gram.fst.txt"
+    fst_path = output_dir / f"G_3_gram{suffix}.fst.txt"
     _arpa_to_fst_single(arpa_path, fst_path, max_order=3)
+    # Optionnal 4-gram arpa to fst conversion
     if convert_4gram:
         # arpa_path = arpa_dir / "4-gram.arpa"
         arpa_path = arpa_dir / "4-gram.arpa"
-        fst_path = output_dir / "G_4_gram.fst.txt"
+        fst_path = output_dir / f"G_4_gram{suffix}.fst.txt"
         _arpa_to_fst_single(arpa_path, fst_path, max_order=4)
+
+def get_bpe_tokenizer(hparams) -> spm.SentencePieceProcessor:
+    """Get the BPE tokenizer. If the BPE model does not exist, then we will
+    train it using SentencePiece.
+
+    Args:
+        hparams: The hyperparameters from a yaml file (e.g. hparams/train_hf_wav2vec_k2_mmi_bpe.yaml)
+
+    Returns:
+        The SentencePiece tokenizer.
+    """
+    n_tokens = hparams["output_neurons"]
+    model_prefix = Path(hparams["lang_dir"]) / f"bpe_{n_tokens}"
+    model_file = model_prefix.with_suffix(".model")
+    if not model_file.is_file():
+        with open(hparams["train_csv"]) as f:
+            texts = [line.strip().split(",")[-1] for line in f.readlines()[1:]]
+        transcripts_path = model_file.parent / "train_transcripts.txt"
+        with open(transcripts_path, "w") as f:
+            f.write("\n".join(texts))
+        user_defined_symbols = ["<blk>", "<sos/eos>"]
+        # if hparams["add_word_boundary"]:
+        #     user_defined_symbols += ["<eow>"]
+        unk_id = len(user_defined_symbols)
+        logger.info(f"Saving a BPE model into {model_file}")
+        spm.SentencePieceTrainer.train(
+            input=str(transcripts_path),
+            vocab_size=n_tokens,
+            model_type="bpe",
+            model_prefix=f"bpe_{n_tokens}",
+            input_sentence_size=100000000,
+            character_coverage=1.0,
+            user_defined_symbols=user_defined_symbols,
+            unk_id=unk_id,
+            bos_id=-1,
+            eos_id=-1,
+        )
+        shutil.move(
+            f"bpe_{n_tokens}.model",
+            str(model_file),
+        )
+        shutil.move(
+            f"bpe_{n_tokens}.vocab",
+            str(model_prefix.with_suffix(".vocab")),
+        )
+    tokenizer = spm.SentencePieceProcessor()
+    tokenizer.load(str(model_file))
+    return tokenizer
 
 if __name__ == "__main__":
 
@@ -564,6 +645,7 @@ if __name__ == "__main__":
         hyperparams_to_save=hparams_file,
         overrides=overrides,
     )
+    os.makedirs(hparams["lang_dir"], exist_ok=True)
 
     # Dataset prep (parsing Librispeech)
     from librispeech_prepare import prepare_librispeech  # noqa
@@ -583,26 +665,42 @@ if __name__ == "__main__":
         },
     )
 
+    tokenizer = None
+    if hparams["token_type"] == "bpe":
+        tokenizer = get_bpe_tokenizer(hparams)
+
     # here we create the datasets objects as well as tokenization and encoding
     train_data, valid_data, test_datasets = dataio_prepare(hparams)
 
     # Create the lexicon.txt for k2 training
     run_on_main(
-            get_lexicon,
-            kwargs={
-                "lang_dir": hparams["lang_dir"],
-                "csv_files": [hparams["output_folder"] + "/train.csv"],
-                "extra_vocab_files": [hparams["vocab_file"]],
-                "add_word_boundary": hparams["add_word_boundary"],
-            },
-        )
+        get_lexicon,
+        kwargs={
+            "lang_dir": hparams["lang_dir"],
+            "csv_files": [hparams["output_folder"] + "/train.csv"],
+            "extra_vocab_files": [hparams["vocab_file"]],
+            "add_word_boundary": hparams["add_word_boundary"],
+            "tokenizer": tokenizer,
+            "unit_type": hparams["token_type"],
+        },
+    )
 
-    # Create the lang directory for k2 training
-    run_on_main(
+    if hparams["token_type"] == "char":
+        # Create the lang directory for k2 training
+        run_on_main(
             prepare_lang,
             kwargs={
                 "lang_dir": hparams["lang_dir"],
                 "sil_prob": hparams["sil_prob"],
+            },
+        )
+    else:
+        # Create the lang directory for k2 training with BPE
+        run_on_main(
+            prepare_lang_bpe,
+            kwargs={
+                "lang_dir": hparams["lang_dir"],
+                "tokenizer": tokenizer,
             },
         )
 
@@ -624,8 +722,10 @@ if __name__ == "__main__":
     )
 
     need_G = False
+    rescoring_lm_path = None
+    fsts_suffix = hparams.get("fsts_suffix", "")
     if getattr(asr_brain.hparams, "use_HLG", False) in [True, "True"]:
-        G_path = Path(asr_brain.hparams.lm_dir) / "G_3_gram.fst.txt"
+        G_path = Path(asr_brain.hparams.lm_dir) / f"G_3_gram{fsts_suffix}.fst.txt"
         logger.info(f"Will load LM from {G_path}")
         need_G = True
     else:
@@ -637,7 +737,6 @@ if __name__ == "__main__":
     #       method is whole-lattice-rescoring, then G_3_gram.fst.txt will still be created).
     if need_G or need_4gram:
         # Create the G_3_gram.fst.txt for k2 decoding and G_4_gram.fst.txt for k2 rescoring
-        logger.info("Converting arpa LM to FST")
         run_on_main(
             arpa_to_fst,
             kwargs={
@@ -645,15 +744,19 @@ if __name__ == "__main__":
                 "output_dir": Path(asr_brain.hparams.lm_dir),
                 "words_txt": Path(asr_brain.hparams.lang_dir) / "words.txt",
                 "convert_4gram": need_4gram,
+                "suffix": fsts_suffix
             },
         )
+        rescoring_lm_path = Path(asr_brain.hparams.lm_dir) / f"G_4_gram{fsts_suffix}.fst.txt"
     if need_G:
         assert G_path.is_file(), f"{G_path} does not exist"
+    
     graph_compiler = CtcTrainingGraphCompiler(
         lexicon=lexicon,
         device=asr_brain.device,
         G_path=G_path,
-        rescoring_lm_path=Path(asr_brain.hparams.lm_dir) / "G_4_gram.fst.txt" if need_4gram else None,
+        rescoring_lm_path=rescoring_lm_path,
+        decoding_method=asr_brain.hparams.decoding_method,
     )
 
     # Add attributes to asr_brain
