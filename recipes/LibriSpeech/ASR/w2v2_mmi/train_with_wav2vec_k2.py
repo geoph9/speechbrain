@@ -808,12 +808,15 @@ if __name__ == "__main__":
     train_data, valid_data, test_datasets = dataio_prepare(hparams)
 
     # Create the lexicon.txt for k2 training
+    extra_vocab_files = []
+    if getattr(hparams, "use_extra_vocab", False):
+        extra_vocab_files.append(hparams["vocab_file"])
     run_on_main(
         get_lexicon,
         kwargs={
             "lang_dir": hparams["lang_dir"],
             "csv_files": [hparams["output_folder"] + "/train.csv"],
-            "extra_vocab_files": [hparams["vocab_file"]],
+            "extra_vocab_files": extra_vocab_files,
             "add_word_boundary": hparams["add_word_boundary"],
             "tokenizer": tokenizer,
             "unit_type": hparams["token_type"],

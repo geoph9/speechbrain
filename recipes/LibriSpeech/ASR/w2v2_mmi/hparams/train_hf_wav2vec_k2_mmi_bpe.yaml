@@ -167,6 +167,7 @@ cer_computer: !name:speechbrain.utils.metric_stats.ErrorRateStats
 # For k2 CTC training
 lang_dir: !ref <output_folder>/lang
 vocab_file: !ref <data_folder>/librispeech-vocab.txt
+use_extra_vocab: False
 sil_prob: 0.
 add_word_boundary: False
 subsample_factor: 1
