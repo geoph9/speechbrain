@@ -168,10 +168,12 @@ class Lexicon(object):
         self.word_table = k2.SymbolTable.from_file(lang_dir / "words.txt")
         self.log_unknown_warning = True
         self._L_disambig = None
+        self._L = None
+        self._L_inv = None
 
         if (lang_dir/ "L.pt").exists():
             logger.info(f"Loading pre-compiled {lang_dir}/L.pt")
-            L = k2.Fsa.from_dict(torch.load(lang_dir / "L.pt"))
+            L = k2.arc_sort(k2.Fsa.from_dict(torch.load(lang_dir / "L.pt")))
         else:
             raise RuntimeError(f"{lang_dir}/L.pt does not exist. Please make sure you have successfully created L.pt in {lang_dir}")
 

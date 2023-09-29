@@ -206,3 +206,51 @@ def rescore_with_whole_lattice(
         key = f"lm_scale_{lm_scale:.1f}"
         ans[key] = best_path
     return ans
+
+def get_lattice_or_prune(
+        log_probs,
+        input_lens,
+        graph_compiler,
+        search_beam=32,
+        output_beam=8,
+        min_active_states=30,
+        max_active_states=1000,
+    ):
+    
+    prune_th_list = [1e-10, 1e-9, 1e-8, 1e-7, 1e-6]
+    prune_th_list += [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
+    max_loop_count = 10
+    loop_count = 0
+    dec_graph = graph_compiler.decoding_graph
+    while loop_count <= max_loop_count:
+        try:
+            lattice = k2.get_lattice(
+                log_probs,
+                input_lens,
+                dec_graph,
+                search_beam=search_beam,
+                output_beam=output_beam,
+                min_active_states=min_active_states,
+                max_active_states=max_active_states,
+                subsampling_factor=graph_compiler.subsampling_factor,
+            )
+            return lattice
+        except RuntimeError as e:
+            logger.info(f"Caught exception:\n{e}\n")
+            if loop_count >= max_loop_count:
+                logger.info("Raising error as the resulting lattice is too large and cannot be processed.")
+                raise e
+            logger.info(f"num_arcs before pruning: {dec_graph.arcs.num_elements()}")
+            logger.info(
+                "This OOM is not an error. You shouldn't ignore it. "
+                "If you are using a large number of units (e.g. BPE tokens)"
+                "or --max-duration is too large, or the input sound file is "
+                "difficult to decode, you will meet this exception."
+            ) 
+            dec_graph = k2.prune_on_arc_post(
+                dec_graph,
+                prune_th_list[loop_count],
+                True,
+            )
+            logger.info(f"num_arcs after pruning: {dec_graph.arcs.num_elements()}")
+        loop_count += 1

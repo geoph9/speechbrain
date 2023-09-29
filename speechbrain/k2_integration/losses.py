@@ -240,8 +240,11 @@ class LFMMILoss(nn.Module):
             # if loss.mean() > 2000:
             #     print(f"MMI loss got to inf {loss} for {texts}", end="  ")        
             return loss.mean()
-        else:
+        elif self.reduction == "sum":
             loss = -1 * tot_scores.sum()
+        else:
+            # Keep loss as a 1-D tensor of shape (batch_size,)
+            loss = -1 * (tot_scores / input_lens.to(tot_scores.device))
         return loss
     
     def compute_tot_scores_pruned(

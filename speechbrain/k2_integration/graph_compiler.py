@@ -23,7 +23,7 @@ import torch
 import speechbrain as sb
 
 from speechbrain.k2_integration.lexicon import Lexicon
-from speechbrain.k2_integration.utils import get_texts, one_best_decoding, rescore_with_whole_lattice
+from speechbrain.k2_integration.utils import get_texts, one_best_decoding, rescore_with_whole_lattice, get_lattice_or_prune
 
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,7 @@ class GraphCompiler(ABC):
         G_path: str = None,
         rescoring_lm_path: Union[Path, str] = None,
         decoding_method: str = "1best",
+        subsampling_factor: int = 1,
     ):
         """
         Args:
@@ -56,22 +57,27 @@ class GraphCompiler(ABC):
             graph. If None, then we assume that the language model is not used.
           decoding_method: str
             One of 1best, whole-lattice-rescoring, or nbest.
+          subsampling_factor: int
+            Subsampling factor of the model. If > 1, then we need to subsample the
+            decoding graph to match the output of the model.
         """
-        L_inv = lexicon.L_inv.to(device)
-        L = lexicon.L.to(device)
+        # L_inv = lexicon.L_inv.to(device)
+        # L = lexicon.L.to(device)
         self.lexicon = lexicon
-        assert L_inv.requires_grad is False
+        self.subsampling_factor = subsampling_factor
+        assert self.lexicon.L_inv.requires_grad is False
 
         assert oov in lexicon.word_table
 
-        self.L_inv = k2.arc_sort(L_inv)
-        self.L = k2.arc_sort(L)
+        # self.L_inv = k2.arc_sort(L_inv)
+        # self.L = k2.arc_sort(L)
         self.oov_id = lexicon.word_table[oov]
         self.word_table = lexicon.word_table
 
         max_token_id = max(lexicon.tokens)
         ctc_topo = k2.ctc_topo(max_token_id, modified=False)
         self.ctc_topo = ctc_topo.to(device)
+        self._L_inv = None
 
         self.device = device
         self.G_path: str = G_path
@@ -79,6 +85,13 @@ class GraphCompiler(ABC):
         self.decoding_graph: k2.Fsa = None  # HL or HLG
         self.rescoring_graph: k2.Fsa = None  # G (usually 4-gram LM)
         self.decoding_method: bool = decoding_method
+
+    @property
+    def L_inv(self) -> k2.Fsa:
+        """Return the inverse of L (L_inv) as an FSA."""
+        if self._L_inv is None:
+            self._L_inv = k2.arc_sort(self.lexicon.L_inv).to(self.device)
+        return self._L_inv
 
     def get_G(
             self,
@@ -227,9 +240,9 @@ class GraphCompiler(ABC):
         This is for decoding without language model.
         Usually, you don't need to call this function explicitly.
         '''
-        logger.info("Arc sorting L")
-        L = k2.arc_sort(self.L).to("cpu")
         H = self.ctc_topo.to("cpu")
+        logger.info("Arc sorting L")
+        L = k2.arc_sort(self.lexicon.L).to("cpu")
         logger.info("Composing H and L")
         HL = k2.compose(H, L, inner_labels="tokens")
 
@@ -238,7 +251,9 @@ class GraphCompiler(ABC):
 
         logger.info("Arc sorting HL")
         self.decoding_graph = k2.arc_sort(HL)
-        logger.info("Done compiling HL")
+        # self.decoding_graph = k2.arc_sort(H)
+
+        logger.info(f"Number of arcs in the final HL: {HL.arcs.num_elements()}")
 
     def compile_HLG(self):
         '''
@@ -293,6 +308,8 @@ class GraphCompiler(ABC):
         logger.debug("Arc sorting HLG")
         HLG = k2.arc_sort(HLG)
 
+        logger.info(f"Number of arcs in the final HLG: {HLG.arcs.num_elements()}")
+
         self.decoding_graph = HLG
 
 
@@ -306,6 +323,7 @@ class CtcTrainingGraphCompiler(GraphCompiler):
         G_path: str = None,
         rescoring_lm_path: Union[Path, str] = None,
         decoding_method: str = "1best",
+        subsampling_factor: int = 1,
     ):
         """
         Args:
@@ -331,6 +349,9 @@ class CtcTrainingGraphCompiler(GraphCompiler):
             graph. If None, then we assume that the language model is not used.
           decoding_method: str
             One of 1best, whole-lattice-rescoring, or nbest.
+          subsampling_factor: int
+            Subsampling factor of the model. If > 1, then we need to subsample the
+            decoding graph to match the output of the model.
         """
         
         super().__init__(
@@ -340,6 +361,7 @@ class CtcTrainingGraphCompiler(GraphCompiler):
             G_path=G_path,
             rescoring_lm_path=rescoring_lm_path,
             decoding_method=decoding_method,
+            subsampling_factor=subsampling_factor,
         )
 
         if need_repeat_flag:
@@ -379,29 +401,6 @@ class CtcTrainingGraphCompiler(GraphCompiler):
         assert decoding_graph.requires_grad is False
 
         return decoding_graph
-
-    # def texts_to_ids(self, texts: List[str]) -> List[List[int]]:
-    #     """Convert a list of texts to a list-of-list of word IDs.
-
-    #     Args:
-    #       texts:
-    #         It is a list of strings. Each string consists of space(s)
-    #         separated words. An example containing two strings is given below:
-
-    #             ['HELLO ICEFALL', 'HELLO k2']
-    #     Returns:
-    #       Return a list-of-list of word IDs.
-    #     """
-    #     word_ids_list = []
-    #     for text in texts:
-    #         word_ids = []
-    #         for word in text.split():
-    #             if word in self.word_table:
-    #                 word_ids.append(self.word_table[word])
-    #             else:
-    #                 word_ids.append(self.oov_id)
-    #         word_ids_list.append(word_ids)
-    #     return word_ids_list
 
     def decode(self,
                log_probs: torch.Tensor,
@@ -448,12 +447,14 @@ class CtcTrainingGraphCompiler(GraphCompiler):
             are the language model scale factors used for rescoring.
         """
         lm_scale_list = lm_scale_list or [0.6]
-        if force_device is not None and isinstance(force_device, torch.device):
+        # force_device = torch.device("cpu")
+        if force_device and isinstance(force_device, torch.device):
             device = force_device
             log_probs = log_probs.to(device)
         else:
             device = log_probs.device
         if self.decoding_graph is None:
+            # Disable logging of unknown words if we are in test stage
             if is_test:
                 self.lexicon.log_unknown_warning = False
             if self.G_path is None:
@@ -463,6 +464,10 @@ class CtcTrainingGraphCompiler(GraphCompiler):
                 self.compile_HLG()
                 # if not hasattr(self.decoding_graph, "lm_scores"):
                 #     self.decoding_graph.lm_scores = self.decoding_graph.scores.clone()
+            # Delete lexicon's L and L_inv to save memory
+            if hasattr(self.lexicon, "L"):
+                del self.lexicon.L
+            self._L_inv = None
             if self.decoding_graph.device != device:
                 self.decoding_graph = self.decoding_graph.to(device)
             if self.decoding_method == "whole-lattice-rescoring":
@@ -488,10 +493,11 @@ class CtcTrainingGraphCompiler(GraphCompiler):
             return texts
 
         with torch.no_grad():
-            lattice = k2.get_lattice(
+            torch.cuda.empty_cache()
+            lattice = get_lattice_or_prune(
                 log_probs,
                 input_lens,
-                self.decoding_graph,
+                self,
                 search_beam=search_beam,
                 output_beam=output_beam,
                 min_active_states=min_active_states,
@@ -537,6 +543,7 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
         sos_id: int = 1,
         eos_id: int = 1,
         decoding_method: str = "1best",
+        subsampling_factor: int = 1,
     ):
         """
         Args:
@@ -569,6 +576,9 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
             ID of the end-of-sentence token.
           decoding_method: str
             One of 1best, whole-lattice-rescoring, or nbest.
+          subsampling_factor: int
+            Subsampling factor of the model. If > 1, then we need to subsample the
+            decoding graph to match the output of the model.
         """
         super().__init__(
             lexicon=lexicon,
@@ -578,6 +588,7 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
             G_path=G_path,
             rescoring_lm_path=rescoring_lm_path,
             decoding_method=decoding_method,
+            subsampling_factor=subsampling_factor,
         )
         self.sos_id = sos_id
         self.eos_id = eos_id
@@ -590,11 +601,11 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
         if self._ctc_topo_P is None:
             # build it on demand
             self.build_ctc_topo_P()
-        return self._ctc_topo_P
+        return self._ctc_topo_P.to(self.device)
 
     @property
     def P(self) -> k2.Fsa:
-        if self._p is not None:
+        if isinstance(self._p, k2.Fsa):
             return self._p
         with open(self.P_path) as f:
             # P is not an acceptor because there is
@@ -602,6 +613,17 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
             # have label #0 and aux_label 0 (i.e., <eps>).
             self._p = k2.Fsa.from_openfst(f.read(), acceptor=False)
         return self._p
+    
+    @staticmethod
+    def create_flower_fst(table_file):
+        # Use for debugging
+        with open(table_file, "r") as f:
+            mapping = {w.split()[0]: w.split()[1] for w in f.readlines()}
+        fst = "\n"
+        for value in mapping.values():
+            fst += f"0 0 {value} {value}\n"
+        fst += "0"
+        return fst
 
     def build_ctc_topo_P(self):
         """Build ctc_topo_P, the composition result of
@@ -636,7 +658,7 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
             f"Building ctc_topo (modified=False). max_token_id: {max_token_id}"
         )
 
-        ctc_topo_inv = k2.arc_sort(self.ctc_topo.invert_())
+        ctc_topo_inv = k2.arc_sort(self.ctc_topo.invert())
 
         ctc_topo_P = k2.intersect(
             ctc_topo_inv, P_with_self_loops, treat_epsilons_specially=False
@@ -721,8 +743,11 @@ class MmiTrainingGraphCompiler(CtcTrainingGraphCompiler):
                force_device: Optional[torch.device] = None,
         ) -> Union[List[str], Dict[str, List[str]]]:
         # Make sure we cleanup unsused variables for decoding
-        if getattr(self, "_p", None):
-          del self._p
+        # if getattr(self, "_p", None):
+        #     # delete all unnecessary attributes to save memory
+        #     del self._ctc_topo_P
+        #     self._ctc_topo_P = None
+        #     self._p = None
         return super().decode(
             log_probs=log_probs,
             input_lens=input_lens,
