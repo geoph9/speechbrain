@@ -159,7 +159,9 @@ class ASR(sb.core.Brain):
                 self.wer_metric.append(ids, predicted_words, target_words)
                 self.cer_metric.append(ids, predicted_words, target_words)
                 # cleanup graph compiler to save memory
-                del self.graph_compiler.decoding_graph, self.graph_compiler.rescoring_graph
+                # del self.graph_compiler.decoding_graph, self.graph_compiler.rescoring_graph
+                # self.graph_compiler.rescoring_graph = None
+                # self.graph_compiler.decoding_graph = None
         elif stage == sb.Stage.TEST:  # Language model decoding only used for test
             if self.hparams.use_language_modelling:
                 raise NotImplementedError(
@@ -392,31 +394,34 @@ class ASR(sb.core.Brain):
             stage_stats[f"WER-lm_scale_{best_lm_scale:.1f}"] = best_wer
 
         # log stats and save checkpoint at end-of-epoch
-        if stage == sb.Stage.VALID and sb.utils.distributed.if_main_process():
+        if stage == sb.Stage.VALID:
+            del self.graph_compiler.decoding_graph, self.graph_compiler.rescoring_graph
+            self.graph_compiler.decoding_graph = None
+            self.graph_compiler.rescoring_graph = None
+            if sb.utils.distributed.if_main_process():
+                lr = self.hparams.noam_annealing.current_lr
+                steps = self.optimizer_step
+                optimizer = self.optimizer.__class__.__name__
 
-            lr = self.hparams.noam_annealing.current_lr
-            steps = self.optimizer_step
-            optimizer = self.optimizer.__class__.__name__
-
-            epoch_stats = {
-                "epoch": epoch,
-                "lr": lr,
-                "steps": steps,
-                "optimizer": optimizer,
-            }
-            self.hparams.train_logger.log_stats(
-                stats_meta=epoch_stats,
-                train_stats=self.train_stats,
-                valid_stats=stage_stats,
-            )
-            # self.checkpointer.save_and_keep_only(
-            #     meta={"ACC": stage_stats["ACC"], "epoch": epoch},
-            #     max_keys=["ACC"],
-            #     num_to_keep=10,
-            # )  # TODO: Check if acc_computer needs to be kept in favour of wer
-            self.checkpointer.save_and_keep_only(
-                meta={"WER": stage_stats["WER"]}, min_keys=["WER"],
-            )
+                epoch_stats = {
+                    "epoch": epoch,
+                    "lr": lr,
+                    "steps": steps,
+                    "optimizer": optimizer,
+                }
+                self.hparams.train_logger.log_stats(
+                    stats_meta=epoch_stats,
+                    train_stats=self.train_stats,
+                    valid_stats=stage_stats,
+                )
+                # self.checkpointer.save_and_keep_only(
+                #     meta={"ACC": stage_stats["ACC"], "epoch": epoch},
+                #     max_keys=["ACC"],
+                #     num_to_keep=10,
+                # )  # TODO: Check if acc_computer needs to be kept in favour of wer
+                self.checkpointer.save_and_keep_only(
+                    meta={"WER": stage_stats["WER"]}, min_keys=["WER"],
+                )
 
         elif stage == sb.Stage.TEST:
             self.hparams.train_logger.log_stats(
@@ -779,6 +784,7 @@ if __name__ == "__main__":
         P_path=Path(asr_brain.hparams.lm_dir) / f"{P_model_name}.fst.txt",
         rescoring_lm_path=rescoring_lm_path,
         decoding_method=asr_brain.hparams.decoding_method,
+        subsampling_factor=asr_brain.hparams.subsample_factor,
     )
 
     # Add attributes to asr_brain
