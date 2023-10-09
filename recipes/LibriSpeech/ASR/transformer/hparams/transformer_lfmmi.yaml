@@ -30,7 +30,7 @@ data_folder: !PLACEHOLDER # e.g., /path/to/LibriSpeech
 # then data_folder_rirs should be /localscratch/xxx_corpus
 # otherwise the dataset will automatically be downloaded
 # data_folder_rirs: !ref <data_folder>
-train_splits: ["train-clean-100"] #, "train-clean-360", "train-other-500"]
+train_splits: ["train-clean-100", "train-clean-360", "train-other-500"]
 dev_splits: ["dev-clean"]
 test_splits: ["test-clean", "test-other"]
 skip_prep: False
@@ -316,8 +316,8 @@ decoding_method: whole-lattice-rescoring
 # will first create a 2-gram character-levelP.arpa (see
 # make_kn_lm.py) and then convert it to P.fst.txt using kaldilm.
 lm_dir: lm
-unit_level_max_order: 4
-P_model_name: P_four
+unit_level_max_order: 3
+P_model_name: !ref P_<unit_level_max_order>_full_<seed>
 lm_scale_list: [0.6, 0.8, 1.0, 1.2, 1.4, 1.8, 2.0]
 # upsample whenever the input the time dimension of the w2v2
 # features is smaller than the number of characters in the
