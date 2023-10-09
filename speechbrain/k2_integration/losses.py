@@ -229,17 +229,13 @@ class LFMMILoss(nn.Module):
 
         # TODO: Use the pruned version only when we use bpe units (i.e. larger
         # log_probs matrix). Otherwise, use the exact version.
-        # tot_scores = self.compute_tot_scores_pruned(dense_fsa_vec, texts)
-        tot_scores = self.compute_tot_scores_exact(dense_fsa_vec, texts)
+        tot_scores = self.compute_tot_scores_pruned(dense_fsa_vec, texts)
+        # tot_scores = self.compute_tot_scores_exact(dense_fsa_vec, texts)
 
         if self.reduction == "mean":
             # If reduction is mean then we need to divide the loss of
             # each utterance by its length.
-            # loss = mmi_loss / input_lens
-            loss = -1 * (tot_scores / input_lens.to(tot_scores.device))
-            # if loss.mean() > 2000:
-            #     print(f"MMI loss got to inf {loss} for {texts}", end="  ")        
-            return loss.mean()
+            loss = -1 * (tot_scores / input_lens.to(tot_scores.device)).mean()
         elif self.reduction == "sum":
             loss = -1 * tot_scores.sum()
         else:

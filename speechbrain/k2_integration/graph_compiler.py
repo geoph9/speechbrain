@@ -252,6 +252,7 @@ class GraphCompiler(ABC):
         logger.info("Arc sorting HL")
         self.decoding_graph = k2.arc_sort(HL)
         # self.decoding_graph = k2.arc_sort(H)
+        torch.save(self.decoding_graph.as_dict(), self.lexicon.lang_dir / "HL.pt")
 
         logger.info(f"Number of arcs in the final HL: {HL.arcs.num_elements()}")
 

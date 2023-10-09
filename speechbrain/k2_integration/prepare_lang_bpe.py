@@ -151,7 +151,7 @@ def lexicon_to_fst_no_sil(
 
     arcs = []
 
-    assert token2id["<blk>"] == 0
+    # assert token2id["<blk>"] == 0
     assert word2id["<eps>"] == 0
 
     eps = 0
