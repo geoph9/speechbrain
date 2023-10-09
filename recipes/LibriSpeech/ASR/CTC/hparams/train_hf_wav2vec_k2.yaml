@@ -183,3 +183,8 @@ decoding_method: whole-lattice-rescoring
 # using kaldilm.
 lm_dir: lm
 lm_scale_list: [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4]
+upscale: False
+
+fsts_suffix: !ref _<seed>_bpe<output_neurons>
+
+token_type: char
