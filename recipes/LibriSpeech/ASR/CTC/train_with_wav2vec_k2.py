@@ -579,7 +579,7 @@ def arpa_to_fst(
         fst_path = output_dir / f"G_4_gram{suffix}.fst.txt"
         _arpa_to_fst_single(arpa_path, fst_path, max_order=4)
 
-def get_bpe_tokenizer(hparams) -> spm.SentencePieceProcessor:
+def get_bpe_tokenizer(hparams, overwrite: bool = True) -> spm.SentencePieceProcessor:
     """Get the BPE tokenizer. If the BPE model does not exist, then we will
     train it using SentencePiece.
 
@@ -590,9 +590,10 @@ def get_bpe_tokenizer(hparams) -> spm.SentencePieceProcessor:
         The SentencePiece tokenizer.
     """
     n_tokens = hparams["output_neurons"]
-    model_prefix = Path(hparams["lang_dir"]) / f"bpe_{n_tokens}"
+    model_type = "bpe"
+    model_prefix = Path(hparams["lang_dir"]) / f"{model_type}_{n_tokens}"
     model_file = model_prefix.with_suffix(".model")
-    if not model_file.is_file():
+    if overwrite or not model_file.is_file():
         with open(hparams["train_csv"]) as f:
             texts = [line.strip().split(",")[-1] for line in f.readlines()[1:]]
         transcripts_path = model_file.parent / "train_transcripts.txt"
@@ -606,21 +607,24 @@ def get_bpe_tokenizer(hparams) -> spm.SentencePieceProcessor:
         spm.SentencePieceTrainer.train(
             input=str(transcripts_path),
             vocab_size=n_tokens,
-            model_type="bpe",
-            model_prefix=f"bpe_{n_tokens}",
+            model_type=model_type,
+            model_prefix=f"{model_type}_{n_tokens}",
             input_sentence_size=100000000,
             character_coverage=1.0,
             user_defined_symbols=user_defined_symbols,
             unk_id=unk_id,
             bos_id=-1,
             eos_id=-1,
+            unk_surface="<unk>",
+            # bos_piece="<sos/eos>",
+            # add_dummy_prefix=False,
         )
         shutil.move(
-            f"bpe_{n_tokens}.model",
+            f"{model_type}_{n_tokens}.model",
             str(model_file),
         )
         shutil.move(
-            f"bpe_{n_tokens}.vocab",
+            f"{model_type}_{n_tokens}.vocab",
             str(model_prefix.with_suffix(".vocab")),
         )
     tokenizer = spm.SentencePieceProcessor()
@@ -673,12 +677,16 @@ if __name__ == "__main__":
     train_data, valid_data, test_datasets = dataio_prepare(hparams)
 
     # Create the lexicon.txt for k2 training
+    extra_vocab_files = []
+    if getattr(hparams, "use_extra_vocab", False):
+        extra_vocab_files.append(hparams["vocab_file"])
+    # Create the lexicon.txt for k2 training
     run_on_main(
         get_lexicon,
         kwargs={
             "lang_dir": hparams["lang_dir"],
             "csv_files": [hparams["output_folder"] + "/train.csv"],
-            "extra_vocab_files": [hparams["vocab_file"]],
+            "extra_vocab_files": extra_vocab_files,
             "add_word_boundary": hparams["add_word_boundary"],
             "tokenizer": tokenizer,
             "unit_type": hparams["token_type"],

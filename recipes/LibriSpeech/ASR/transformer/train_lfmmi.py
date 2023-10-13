@@ -795,14 +795,15 @@ if __name__ == "__main__":
         run_on_main(hparams["pretrainer"].collect_files)
         hparams["pretrainer"].load_collected(asr_brain.device)
 
-    # Training
-    asr_brain.fit(
-        asr_brain.hparams.epoch_counter,
-        train_data,
-        valid_data,
-        train_loader_kwargs=hparams["train_dataloader_opts"],
-        valid_loader_kwargs=hparams["valid_dataloader_opts"],
-    )
+    with torch.autograd.detect_anomaly():
+        # Training
+        asr_brain.fit(
+            asr_brain.hparams.epoch_counter,
+            train_data,
+            valid_data,
+            train_loader_kwargs=hparams["train_dataloader_opts"],
+            valid_loader_kwargs=hparams["valid_dataloader_opts"],
+        )
 
     # Testing
     for k in test_datasets.keys():  # keys are test_clean, test_other etc

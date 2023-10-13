@@ -714,7 +714,7 @@ def create_P_fst(
     with open(fst_path, "w") as f:
         f.write(s)
 
-def get_bpe_tokenizer(hparams) -> spm.SentencePieceProcessor:
+def get_bpe_tokenizer(hparams, overwrite: bool = True) -> spm.SentencePieceProcessor:
     """Get the BPE tokenizer. If the BPE model does not exist, then we will
     train it using SentencePiece.
 
@@ -727,7 +727,7 @@ def get_bpe_tokenizer(hparams) -> spm.SentencePieceProcessor:
     n_tokens = hparams["output_neurons"]
     model_prefix = Path(hparams["lang_dir"]) / f"bpe_{n_tokens}"
     model_file = model_prefix.with_suffix(".model")
-    if not model_file.is_file():
+    if overwrite or not model_file.is_file():
         with open(hparams["train_csv"]) as f:
             texts = [line.strip().split(",")[-1] for line in f.readlines()[1:]]
         transcripts_path = model_file.parent / "train_transcripts.txt"

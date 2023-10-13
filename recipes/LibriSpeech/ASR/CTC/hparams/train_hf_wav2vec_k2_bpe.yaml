@@ -8,7 +8,7 @@
 # Seed needs to be set at top of yaml, before objects with parameters are made
 seed: 1111
 __set_seed: !apply:torch.manual_seed [!ref <seed>]
-output_folder: !ref results/train_wav2vec2_bpe_k2/<seed>
+output_folder: !ref results/train_wav2vec2_bpe_k2/<seed>_bpe<output_neurons>
 wer_file: !ref <output_folder>/wer.txt
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
@@ -21,11 +21,11 @@ wav2vec2_folder: !ref <save_folder>/wav2vec2_checkpoint
 data_folder: !PLACEHOLDER # e,g./path/to/LibriSpeech
 # noise/ris dataset will automatically be downloaded
 # data_folder_rirs: !ref <data_folder>
-train_splits: ["train-clean-100"] #, "train-clean-360", "train-other-500"]
+train_splits: ["train-clean-100", "train-clean-360", "train-other-500"]
 dev_splits: ["dev-clean", "dev-other"]
 test_splits: ["test-clean", "test-other"]
 skip_prep: False
-ckpt_interval_minutes: 25 # save checkpoint every N min
+ckpt_interval_minutes: 40 # save checkpoint every N min
 train_csv: !ref <output_folder>/train.csv
 valid_csv: !ref <output_folder>/dev-clean.csv
 test_csv:
