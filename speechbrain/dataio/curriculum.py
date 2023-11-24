@@ -22,6 +22,11 @@ from speechbrain.dataio.dataset import (
 from speechbrain.utils.distributed import run_on_main
 from speechbrain.utils.data_pipeline import DataPipeline
 from speechbrain.cl.scoring_functions import wada_snr, speech_rate
+from speechbrain.utils.checkpoints import (
+    register_checkpoint_hooks,
+    mark_as_saver,
+    mark_as_loader,
+)
 # from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
@@ -192,7 +197,7 @@ class CurriculumBase(DynamicItemDataset):
         return FilteredSortedDynamicItemDataset(self, current_indices)
 
 
-@sb.utils.checkpoints.register_checkpoint_hooks
+@register_checkpoint_hooks
 class CurriculumDataset(CurriculumBase):
     """ A wrapper around `DynamicItemDataset` which will change the way the dataset
         is sorted. In addition, it aims at filtering out the "hard" examples.
@@ -273,7 +278,7 @@ class CurriculumDataset(CurriculumBase):
             self.cache.append(utt_info["id"])
         return is_easy
     
-    @sb.utils.checkpoints.mark_as_saver
+    @mark_as_saver
     def save_cache(self, path: str = None):
         """Save the cache to a file. The cache is a list of utterance ids that
         have been used in previous epochs.
@@ -284,8 +289,8 @@ class CurriculumDataset(CurriculumBase):
                 f.write(f"{utt_id}\n")
         logger.info(f"Saved cache to {path}.")
     
-    @sb.utils.checkpoints.mark_as_loader
-    def load_cache(self, path: str = None):
+    @mark_as_loader
+    def load_cache(self, path: str = None, end_of_epoch: bool = False, device: str = None):
         """Load the cache from a file. The cache is a list of utterance ids that
         have been used in previous epochs.
         """
