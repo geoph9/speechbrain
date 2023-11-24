@@ -714,7 +714,7 @@ def create_P_fst(
     with open(fst_path, "w") as f:
         f.write(s)
 
-def get_bpe_tokenizer(hparams, overwrite: bool = True) -> spm.SentencePieceProcessor:
+def get_bpe_tokenizer(hparams, overwrite: bool = False) -> spm.SentencePieceProcessor:
     """Get the BPE tokenizer. If the BPE model does not exist, then we will
     train it using SentencePiece.
 
@@ -725,37 +725,43 @@ def get_bpe_tokenizer(hparams, overwrite: bool = True) -> spm.SentencePieceProce
         The SentencePiece tokenizer.
     """
     n_tokens = hparams["output_neurons"]
-    model_prefix = Path(hparams["lang_dir"]) / f"bpe_{n_tokens}"
+    model_type = "bpe"
+    model_prefix = Path(hparams["lang_dir"]) / f"{model_type}_{n_tokens}"
     model_file = model_prefix.with_suffix(".model")
     if overwrite or not model_file.is_file():
-        with open(hparams["train_csv"]) as f:
-            texts = [line.strip().split(",")[-1] for line in f.readlines()[1:]]
         transcripts_path = model_file.parent / "train_transcripts.txt"
-        with open(transcripts_path, "w") as f:
-            f.write("\n".join(texts))
+        if not transcripts_path.is_file():
+            with open(hparams["train_csv"]) as f:
+                texts = [line.strip().split(",")[-1] for line in f.readlines()[1:]]
+            with open(transcripts_path, "w") as f:
+                f.write("\n".join(texts))
         user_defined_symbols = ["<blk>", "<sos/eos>"]
-        # if hparams["add_word_boundary"]:
-        #     user_defined_symbols += ["<eow>"]
+        if hparams["add_word_boundary"]:
+            user_defined_symbols += ["<eow>"]
         unk_id = len(user_defined_symbols)
         logger.info(f"Saving a BPE model into {model_file}")
         spm.SentencePieceTrainer.train(
             input=str(transcripts_path),
             vocab_size=n_tokens,
-            model_type="bpe",
-            model_prefix=f"bpe_{n_tokens}",
+            model_type=model_type,
+            model_prefix=f"{model_type}_{n_tokens}",
             input_sentence_size=100000000,
             character_coverage=1.0,
             user_defined_symbols=user_defined_symbols,
             unk_id=unk_id,
             bos_id=-1,
             eos_id=-1,
+            unk_surface="<unk>",
+            # bos_piece="<sos/eos>",
+            add_dummy_prefix=False,
+            # treat_whitespace_as_suffix=True,
         )
         shutil.move(
-            f"bpe_{n_tokens}.model",
+            f"{model_type}_{n_tokens}.model",
             str(model_file),
         )
         shutil.move(
-            f"bpe_{n_tokens}.vocab",
+            f"{model_type}_{n_tokens}.vocab",
             str(model_prefix.with_suffix(".vocab")),
         )
     tokenizer = spm.SentencePieceProcessor()
@@ -809,7 +815,9 @@ if __name__ == "__main__":
 
     # Create the lexicon.txt for k2 training
     extra_vocab_files = []
-    if getattr(hparams, "use_extra_vocab", False):
+    # if getattr(hparams, "use_extra_vocab", False):
+    if True:
+        logger.info("=========================================================================================Using extra vocab file")
         extra_vocab_files.append(hparams["vocab_file"])
     run_on_main(
         get_lexicon,
@@ -839,6 +847,7 @@ if __name__ == "__main__":
             kwargs={
                 "lang_dir": hparams["lang_dir"],
                 "tokenizer": tokenizer,
+                "use_toks_from_lexicon": True,
             },
         )
 

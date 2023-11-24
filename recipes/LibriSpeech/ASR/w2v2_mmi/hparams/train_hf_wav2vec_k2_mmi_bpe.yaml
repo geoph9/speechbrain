@@ -1,5 +1,5 @@
 # ################################
-# Model: wav2vec2 + DNN + CTC + LM (k2)
+# Model: wav2vec2 + DNN + CTC + LM (k2) with BPE units
 # Augmentation: SpecAugment
 # Authors: Zeyu Zhao 2023
 #          Georgios Karakasidis 2023
@@ -8,7 +8,8 @@
 # Seed needs to be set at top of yaml, before objects with parameters are made
 seed: 1111
 __set_seed: !apply:torch.manual_seed [!ref <seed>]
-output_folder: !ref results/train_wav2vec2_bpe_k2/<seed>
+exp_suffix: _eow-nowhite_extra_vocab
+output_folder: !ref results/train_wav2vec2_bpe_k2/<seed>_bpe<exp_suffix>
 wer_file: !ref <output_folder>/wer.txt
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
@@ -21,11 +22,11 @@ wav2vec2_folder: !ref <save_folder>/wav2vec2_checkpoint
 data_folder: !PLACEHOLDER # e,g./path/to/LibriSpeech
 # noise/ris dataset will automatically be downloaded
 # data_folder_rirs: !ref <data_folder>
-train_splits: ["train-clean-100"] #, "train-clean-360", "train-other-500"]
+train_splits: ["train-clean-100", "train-clean-360", "train-other-500"]
 dev_splits: ["dev-clean", "dev-other"]
 test_splits: ["test-clean", "test-other"]
 skip_prep: False
-ckpt_interval_minutes: 25 # save checkpoint every N min
+ckpt_interval_minutes: 40 # save checkpoint every N min
 train_csv: !ref <output_folder>/train.csv
 valid_csv: !ref <output_folder>/dev-clean.csv
 test_csv:
@@ -65,7 +66,7 @@ dnn_neurons: 1024
 freeze_wav2vec: True
 
 # Outputs
-output_neurons: 1000  # BPE size, index(blank/eos/bos) = 0
+output_neurons: 100  # BPE size, index(blank/eos/bos) = 0
 
 # Decoding parameters
 blank_index: 0
@@ -167,18 +168,18 @@ cer_computer: !name:speechbrain.utils.metric_stats.ErrorRateStats
 # For k2 CTC training
 lang_dir: !ref <output_folder>/lang
 vocab_file: !ref <data_folder>/librispeech-vocab.txt
-use_extra_vocab: False
+use_extra_vocab: True
 sil_prob: 0.
-add_word_boundary: False
+add_word_boundary: True
 subsample_factor: 1
 # For k2 decoding
-test_search_beam: 32
+test_search_beam: 20
 # Beam size (for decoding)
-test_output_beam: 6
+test_output_beam: 4
 test_max_active_state: 1000
 # Acoustic scale (mutliplied by the log probs)
 ac_scale: 1.0
-use_HLG: False
+use_HLG: True
 # 1best or whole-lattice-rescoring
 decoding_method: 1best
 # This is where the 3gram and (optionally) 4gram LM are stored
@@ -197,7 +198,7 @@ lm_scale_list: [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4]
 # transcription
 upsampling: True
 
-fsts_suffix: !ref _<seed>
+fsts_suffix: !ref _<seed>_<exp_suffix>
 
 # BPE tokenization
 token_type: bpe
