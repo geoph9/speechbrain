@@ -8,7 +8,8 @@
 # Seed needs to be set at top of yaml, before objects with parameters are made
 seed: 1111
 __set_seed: !apply:torch.manual_seed [!ref <seed>]
-output_folder: !ref results/train_wav2vec2_bpe_k2/<seed>_bpe<output_neurons>
+exp_suffix: _eow-nowhite_extra_vocab-correct-toks
+output_folder: !ref results/train_wav2vec2_bpe_k2/<seed>_bpe<output_neurons><exp_suffix>
 wer_file: !ref <output_folder>/wer.txt
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
@@ -65,7 +66,7 @@ dnn_neurons: 1024
 freeze_wav2vec: True
 
 # Outputs
-output_neurons: 500  # BPE size, index(blank/eos/bos) = 0
+output_neurons: 100  # BPE size, index(blank/eos/bos) = 0
 
 # Decoding parameters
 blank_index: 0
@@ -165,9 +166,9 @@ cer_computer: !name:speechbrain.utils.metric_stats.ErrorRateStats
 # For k2 CTC training
 lang_dir: !ref <output_folder>/lang
 vocab_file: !ref <data_folder>/librispeech-vocab.txt
-use_extra_vocab: False
+use_extra_vocab: True
 sil_prob: 0.
-add_word_boundary: False
+add_word_boundary: True
 subsample_factor: 1
 # For k2 decoding
 test_search_beam: 20

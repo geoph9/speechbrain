@@ -506,6 +506,7 @@ def arpa_to_fst(
         disambig_symbol: str = "#0",
         convert_4gram: bool = True,
         suffix: Optional[str] = "",
+        hparams={},
     ):
     """ Use kaldilm to convert an ARPA LM to FST. For example, in librispeech
     you can find a 3-gram (pruned) and a 4-gram ARPA LM in the openslr
@@ -569,7 +570,8 @@ def arpa_to_fst(
         with open(out_fst_path, "w") as f:
             f.write(s)
     # 3-gram arpa to fst conversion...
-    arpa_path = arpa_dir / "3-gram.pruned.1e-7.arpa"
+    # arpa_path = arpa_dir / "3-gram.pruned.1e-7.arpa"
+    arpa_path = Path(hparams.get("arpa_3gram_path", arpa_dir / "3-gram.pruned.1e-7.arpa"))
     fst_path = output_dir / f"G_3_gram{suffix}.fst.txt"
     _arpa_to_fst_single(arpa_path, fst_path, max_order=3)
     # Optionnal 4-gram arpa to fst conversion
@@ -579,7 +581,7 @@ def arpa_to_fst(
         fst_path = output_dir / f"G_4_gram{suffix}.fst.txt"
         _arpa_to_fst_single(arpa_path, fst_path, max_order=4)
 
-def get_bpe_tokenizer(hparams, overwrite: bool = True) -> spm.SentencePieceProcessor:
+def get_bpe_tokenizer(hparams, overwrite: bool = False) -> spm.SentencePieceProcessor:
     """Get the BPE tokenizer. If the BPE model does not exist, then we will
     train it using SentencePiece.
 
@@ -600,8 +602,8 @@ def get_bpe_tokenizer(hparams, overwrite: bool = True) -> spm.SentencePieceProce
         with open(transcripts_path, "w") as f:
             f.write("\n".join(texts))
         user_defined_symbols = ["<blk>", "<sos/eos>"]
-        # if hparams["add_word_boundary"]:
-        #     user_defined_symbols += ["<eow>"]
+        if hparams["add_word_boundary"]:
+            user_defined_symbols += ["<eow>"]
         unk_id = len(user_defined_symbols)
         logger.info(f"Saving a BPE model into {model_file}")
         spm.SentencePieceTrainer.train(
@@ -617,7 +619,7 @@ def get_bpe_tokenizer(hparams, overwrite: bool = True) -> spm.SentencePieceProce
             eos_id=-1,
             unk_surface="<unk>",
             # bos_piece="<sos/eos>",
-            # add_dummy_prefix=False,
+            add_dummy_prefix=False,
         )
         shutil.move(
             f"{model_type}_{n_tokens}.model",
@@ -678,7 +680,8 @@ if __name__ == "__main__":
 
     # Create the lexicon.txt for k2 training
     extra_vocab_files = []
-    if getattr(hparams, "use_extra_vocab", False):
+    # if getattr(hparams, "use_extra_vocab", False):
+    if True:
         extra_vocab_files.append(hparams["vocab_file"])
     # Create the lexicon.txt for k2 training
     run_on_main(
@@ -709,6 +712,7 @@ if __name__ == "__main__":
             kwargs={
                 "lang_dir": hparams["lang_dir"],
                 "tokenizer": tokenizer,
+                "use_toks_from_lexicon": True,
             },
         )
 
@@ -752,7 +756,8 @@ if __name__ == "__main__":
                 "output_dir": Path(asr_brain.hparams.lm_dir),
                 "words_txt": Path(asr_brain.hparams.lang_dir) / "words.txt",
                 "convert_4gram": need_4gram,
-                "suffix": fsts_suffix
+                "suffix": fsts_suffix,
+                "hparams": hparams,
             },
         )
         rescoring_lm_path = Path(asr_brain.hparams.lm_dir) / f"G_4_gram{fsts_suffix}.fst.txt"
