@@ -8,7 +8,8 @@
 # Seed needs to be set at top of yaml, before objects with parameters are made
 seed: 1111
 __set_seed: !apply:torch.manual_seed [!ref <seed>]
-output_folder: !ref results/train_wav2vec2_char_k2/<seed>
+exp_suffix: !ref _<unit_level_max_order>gram_extra_vocab_100h
+output_folder: !ref results/train_wav2vec2_char_k2/<seed>_<exp_suffix>
 wer_file: !ref <output_folder>/wer.txt
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
@@ -21,7 +22,7 @@ wav2vec2_folder: !ref <save_folder>/wav2vec2_checkpoint
 data_folder: !PLACEHOLDER # e,g./path/to/LibriSpeech
 # noise/ris dataset will automatically be downloaded
 # data_folder_rirs: !ref <data_folder>
-train_splits: ["train-clean-100", "train-clean-360", "train-other-500"]
+train_splits: ["train-clean-100" ] #, "train-clean-360", "train-other-500"]
 dev_splits: ["dev-clean", "dev-other"]
 test_splits: ["test-clean", "test-other"]
 skip_prep: False
@@ -167,6 +168,7 @@ cer_computer: !name:speechbrain.utils.metric_stats.ErrorRateStats
 # For k2 CTC training
 lang_dir: !ref <output_folder>/lang
 vocab_file: !ref <data_folder>/librispeech-vocab.txt
+use_extra_vocab: True
 sil_prob: 0.
 add_word_boundary: True
 subsample_factor: 1
@@ -188,14 +190,14 @@ decoding_method: whole-lattice-rescoring
 # will first create a 2-gram character-levelP.arpa (see
 # make_kn_lm.py) and then convert it to P.fst.txt using kaldilm.
 lm_dir: lm
-unit_level_max_order: 4
-P_model_name: P_four
+unit_level_max_order: 2
+P_model_name: !ref P_<unit_level_max_order>gram
 lm_scale_list: [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4]
 # upsample whenever the input the time dimension of the w2v2
 # features is smaller than the number of characters in the
 # transcription
 upsampling: True
 
-fsts_suffix: !ref _<seed>
+fsts_suffix: !ref _<seed>_<exp_suffix>
 
 token_type: char
