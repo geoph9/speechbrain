@@ -4,10 +4,8 @@
 # Modified for integration with SpeechBrain 2023 the University of Edinburgh (Zeyu Zhao, Georgios Karakasidis)
 
 
-import math
 import os
 import logging
-from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -16,7 +14,7 @@ import torch
 import sentencepiece as spm
 
 from speechbrain.k2_integration.lexicon import read_lexicon, write_lexicon
-from speechbrain.k2_integration.prepare_lang import add_disambig_symbols
+from speechbrain.k2_integration.prepare_lang import add_disambig_symbols, lexicon_to_fst
 
 Lexicon = List[Tuple[str, List[str]]]
 
@@ -40,20 +38,44 @@ def write_mapping(filename: str, sym2id: Dict[str, int]) -> None:  #TODO
         for sym, i in sym2id.items():
             f.write(f"{sym} {i}\n")
 
-#TODO
-def get_tokens(lexicon: Lexicon) -> List[str]:
+# #TODO
+# def get_tokens(lexicon: Lexicon) -> List[str]:
+#     """Get tokens from a lexicon.
+
+#     Args:
+#       lexicon:
+#         It is the return value of :func:`read_lexicon`.
+#     Returns:
+#       Return a list of unique tokens.
+#     """
+#     ans = set()
+#     for _, tokens in lexicon:
+#         ans.update(tokens)
+#     sorted_ans = sorted(list(ans))
+#     return sorted_ans
+def get_tokens(lexicon: Lexicon, sil_token="SIL", manually_add_sil_to_tokens=False, unk_token="<unk>") -> List[str]:
     """Get tokens from a lexicon.
 
     Args:
       lexicon:
         It is the return value of :func:`read_lexicon`.
+      sil_token:
+        The optional silence token between words. It should not appear in the lexicon, otherwise it will cause an error.
     Returns:
       Return a list of unique tokens.
     """
     ans = set()
     for _, tokens in lexicon:
+        # assert sil_token not in tokens, f"{sil_token} should not appear in the lexicon but it is found in {_}"
         ans.update(tokens)
+    # remove unk_token and add it later (it's id needs to be after sil but before any other token)
+    ans.remove(unk_token)
+    if manually_add_sil_to_tokens:
+        ans.remove(sil_token)
     sorted_ans = sorted(list(ans))
+    sorted_ans = [unk_token] + sorted_ans
+    if manually_add_sil_to_tokens:
+        sorted_ans = [sil_token] + sorted_ans
     return sorted_ans
 
 #TODO
@@ -197,7 +219,12 @@ def lexicon_to_fst_no_sil(
     return fsa
 
 
-def prepare_lang(lang_dir, tokenizer: spm.SentencePieceProcessor):
+def prepare_lang(
+        lang_dir,
+        sil_token="<sil>",
+        sil_prob=0.5,
+        unk_token="<unk>",
+    ):
     """
     This function takes as input a lexicon file "$lang_dir/lexicon.txt"
     consisting of words and tokens (i.e., phones) and does the following:
@@ -219,8 +246,9 @@ def prepare_lang(lang_dir, tokenizer: spm.SentencePieceProcessor):
     Args:
 
     lang_dir: The directory to store the output files and read the input file lexicon.txt.
-    sil_token: The silence token. Default is "SIL".
-    sil_prob: The probability for adding a silence at the beginning and end of the word. Default is 0.5.
+    sil_token: The silence token.
+    sil_prob: The probability of adding silence to the tokens. If 0, then silence is not added to the tokens.
+    unk_token: The unknown token. Default is <unk>.
     """
 
     out_dir = Path(lang_dir)
@@ -235,18 +263,25 @@ def prepare_lang(lang_dir, tokenizer: spm.SentencePieceProcessor):
 
     lexicon = read_lexicon(lexicon_filename)
     
-    # tokens = get_tokens(lexicon)
+    if sil_prob != 0:
+        # add silence to the tokens
+        tokens = get_tokens(lexicon, sil_token=sil_token,
+                            manually_add_sil_to_tokens=True,
+                            unk_token=unk_token)
+    else:
+        tokens = get_tokens(lexicon, manually_add_sil_to_tokens=False, unk_token=unk_token)
     words = get_words(lexicon)
 
     lexicon_disambig, max_disambig = add_disambig_symbols(lexicon)
 
-    # for i in range(max_disambig + 1):
-    #     disambig = f"#{i}"
-    #     assert disambig not in tokens
-    #     tokens.append(f"#{i}")
+    for i in range(max_disambig + 1):
+        disambig = f"#{i}"
+        assert disambig not in tokens
+        tokens.append(f"#{i}")
 
-    # assert "<eps>" not in tokens
-    # tokens = ["<eps>"] + tokens
+    assert "<eps>" not in tokens
+    tokens = ["<eps>"] + tokens
+    token_sym_table: Dict[str, int] = generate_id_map(tokens)
 
     assert "<eps>" not in words
     assert "#0" not in words
@@ -257,31 +292,40 @@ def prepare_lang(lang_dir, tokenizer: spm.SentencePieceProcessor):
 
     word2id = generate_id_map(words)
 
-    token_sym_table: Dict[str, int] = {
-        tokenizer.id_to_piece(i): i for i in range(tokenizer.vocab_size())
-    }
-    next_token_id = max(token_sym_table.values()) + 1
-    for i in range(max_disambig + 1):
-        disambig = f"#{i}"
-        assert disambig not in token_sym_table
-        token_sym_table[disambig] = next_token_id
-        next_token_id += 1
-
     write_mapping(out_dir / "tokens.txt", token_sym_table)
     write_mapping(out_dir / "words.txt", word2id)
     write_lexicon(out_dir / "lexicon_disambig.txt", lexicon_disambig)
 
-    L = lexicon_to_fst_no_sil(
-        lexicon,
-        token2id=token_sym_table,
-        word2id=word2id,
-    )
-    L_disambig = lexicon_to_fst_no_sil(
-        lexicon_disambig,
-        token2id=token_sym_table,
-        word2id=word2id,
-        need_self_loops=True,
-    )
+    if sil_prob > 0:
+        L = lexicon_to_fst(
+            lexicon,
+            token2id=token_sym_table,
+            word2id=word2id,
+            sil_token=sil_token,
+            sil_prob=sil_prob,
+        )
+    else:
+        L = lexicon_to_fst_no_sil(
+            lexicon,
+            token2id=token_sym_table,
+            word2id=word2id,
+        )
+    if sil_prob > 0:
+        L_disambig = lexicon_to_fst(
+            lexicon_disambig,
+            token2id=token_sym_table,
+            word2id=word2id,
+            sil_token=sil_token,
+            sil_prob=sil_prob,
+            need_self_loops=True,
+        )
+    else:
+        L_disambig = lexicon_to_fst_no_sil(
+            lexicon_disambig,
+            token2id=token_sym_table,
+            word2id=word2id,
+            need_self_loops=True,
+        )
     torch.save(L.as_dict(), out_dir / "L.pt")
     torch.save(L_disambig.as_dict(), out_dir / "L_disambig.pt")
 

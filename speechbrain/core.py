@@ -1194,7 +1194,7 @@ class Brain:
 
     def _fit_train(self, train_set, epoch, enable):
         # Training stage
-        self.on_stage_start(Stage.TRAIN, epoch)
+        train_set = self.on_stage_start(Stage.TRAIN, epoch) or train_set
         self.modules.train()
         self.zero_grad()
 

@@ -153,6 +153,9 @@ def load_data_csv(csv_path, replacements={}):
                         f"The item {value} requires replacements "
                         "which were not supplied."
                     )
+                except Exception as e:
+                    print(f"Could not replace {value} in {row}")
+                    raise e
             # Duration:
             if "duration" in row:
                 row["duration"] = float(row["duration"])
